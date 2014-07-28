@@ -175,6 +175,7 @@ namespace ct
 						break;
 				}
 			}
+			CFRelease(tmpLine);
 
 			CFArrayRef tabStops = CFArrayCreate(kCFAllocatorDefault, (const void**) (&tabs[0]), tabs.size(), &kCFTypeArrayCallBacks);
 			for(CTTextTabRef t : tabs)
