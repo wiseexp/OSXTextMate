@@ -162,20 +162,21 @@ namespace ct
 				{
 					case ' ':
 						_spaceLocations.push_back(i);
-						break;
+					break;
+
 					case '\t':
 						j += utf16::distance(text.data() + (_tabLocations.empty() ? 0 : _tabLocations.back()), text.data() + i);
 
 						CGFloat x = CTLineGetOffsetForStringIndex(tmpLine, j, NULL);
 						CGFloat newX = (x - standardTabWidths + newTabWidths);
 						CGFloat stopLocation = (floor(newX / tabWidth)+1) * tabWidth;
-						if (stopLocation - newX < metrics.column_width()*0.5)
+						if(stopLocation - newX < metrics.column_width()*0.5)
 							stopLocation += tabWidth;
 						newTabWidths += stopLocation - newX;
 						standardTabWidths += CTLineGetOffsetForStringIndex(tmpLine, j+1, NULL) - x;
 						tabs.push_back(CTTextTabCreate(kCTNaturalTextAlignment, stopLocation, NULL));
 						_tabLocations.push_back(i);
-						break;
+					break;
 				}
 			}
 			CFRelease(tmpLine);
@@ -185,8 +186,8 @@ namespace ct
 				CFRelease(t);
 
 			CTParagraphStyleSetting settings[] = {
-				{kCTParagraphStyleSpecifierTabStops, sizeof(CFArrayRef), &tabStops},
-				{kCTParagraphStyleSpecifierDefaultTabInterval, sizeof(tabWidth), &tabWidth}
+				{ kCTParagraphStyleSpecifierTabStops,           sizeof(CFArrayRef), &tabStops },
+				{ kCTParagraphStyleSpecifierDefaultTabInterval, sizeof(tabWidth),   &tabWidth }
 			};
 			CTParagraphStyleRef paragraphStyle = CTParagraphStyleCreate(settings, 2);
 			CFAttributedStringSetAttribute(toDraw, CFRangeMake(0, CFAttributedStringGetLength(toDraw)), kCTParagraphStyleAttributeName, paragraphStyle);
@@ -239,7 +240,9 @@ namespace ct
 
 		for(auto const& location : locations)
 		{
-			if (location > 5000) break;
+			if(location > 5000)
+				break;
+
 			CGFloat x1 = round(pos.x + offset_for_index(location));
 			CGFloat x2 = round(pos.x + offset_for_index(location+1));
 			CGFloat x = x2 < x1 ? x1 - CTLineGetTypographicBounds(line, NULL, NULL, NULL) : x1;
