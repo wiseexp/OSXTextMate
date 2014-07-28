@@ -102,7 +102,7 @@ namespace ct
 	// = line_t =
 	// ==========
 
-	line_t::line_t (std::string const& text, std::map<size_t, scope::scope_t> const& scopes, theme_ptr const& theme, CGFloat tabSize, ct::metrics_t const& metrics, CGColorRef textColor) : _text(text)
+	line_t::line_t (std::string const& text, std::map<size_t, scope::scope_t> const& scopes, theme_ptr const& theme, size_t tabSize, ct::metrics_t const& metrics, CGColorRef textColor) : _text(text)
 	{
 		ASSERT(utf8::is_valid(text.begin(), text.end()));
 		ASSERT(scopes.empty() || (--scopes.end())->first <= text.size());
@@ -150,10 +150,10 @@ namespace ct
 			}
 
 			CTLineRef tmpLine = CTLineCreateWithAttributedString(toDraw);
-			double tabWidth = tabSize * metrics.column_width();
-			double standardTabWidths = 0;
-			double newTabWidths = 0;
-			size_t j = 0;
+			CGFloat tabWidth = tabSize * metrics.column_width();
+			CGFloat standardTabWidths = 0;
+			CGFloat newTabWidths = 0;
+			CFIndex j = 0;
 			std::vector<CTTextTabRef> tabs;
 			tabs.push_back(CTTextTabCreate(kCTNaturalTextAlignment, 0, NULL));
 			for(size_t i = 0; i < text.size(); ++i)
@@ -166,9 +166,9 @@ namespace ct
 					case '\t':
 						j += utf16::distance(text.data() + (_tabLocations.empty() ? 0 : _tabLocations.back()), text.data() + i);
 
-						double x = CTLineGetOffsetForStringIndex(tmpLine, j, NULL);
-						double newX = (x - standardTabWidths + newTabWidths);
-						double stopLocation = (floor(newX / tabWidth)+1) * tabWidth;
+						CGFloat x = CTLineGetOffsetForStringIndex(tmpLine, j, NULL);
+						CGFloat newX = (x - standardTabWidths + newTabWidths);
+						CGFloat stopLocation = (floor(newX / tabWidth)+1) * tabWidth;
 						if (stopLocation - newX < metrics.column_width()*0.5)
 							stopLocation += tabWidth;
 						newTabWidths += stopLocation - newX;
@@ -225,7 +225,7 @@ namespace ct
 		}
 	}
 
-	void line_t::draw_invisible (std::vector<size_t> locations, CGPoint pos, std::string text, styles_t styles, ng::context_t const& context, bool isFlipped) const
+	void line_t::draw_invisible (std::vector<size_t> locations, CGPoint pos, std::string const& text, styles_t const& styles, ng::context_t const& context, bool isFlipped) const
 	{
 		CFMutableAttributedStringRef str = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0);
 		CFAttributedStringReplaceString(str, CFRangeMake(0, 0), cf::wrap(text));
