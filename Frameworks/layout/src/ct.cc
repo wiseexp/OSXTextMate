@@ -189,7 +189,7 @@ namespace ct
 				{ kCTParagraphStyleSpecifierTabStops,           sizeof(CFArrayRef), &tabStops },
 				{ kCTParagraphStyleSpecifierDefaultTabInterval, sizeof(tabWidth),   &tabWidth }
 			};
-			CTParagraphStyleRef paragraphStyle = CTParagraphStyleCreate(settings, 2);
+			CTParagraphStyleRef paragraphStyle = CTParagraphStyleCreate(settings, sizeofA(settings));
 			CFAttributedStringSetAttribute(toDraw, CFRangeMake(0, CFAttributedStringGetLength(toDraw)), kCTParagraphStyleAttributeName, paragraphStyle);
 			CFRelease(paragraphStyle);
 			CFRelease(tabStops);
