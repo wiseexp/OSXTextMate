@@ -153,14 +153,16 @@ namespace ct
 			double tabWidth = tabSize * metrics.column_width();
 			double standardTabWidths = 0;
 			double newTabWidths = 0;
-			size_t j = 0, i = 0;
+			size_t j = 0;
 			std::vector<CTTextTabRef> tabs;
 			tabs.push_back(CTTextTabCreate(kCTNaturalTextAlignment, 0, NULL));
-			citerate(ch, diacritics::make_range(text.data(), text.data() + text.size()))
+			for(size_t i = 0; i < text.size(); ++i)
 			{
-				switch(*ch)
+				switch(text[i])
 				{
 					case '\t':
+						j += utf16::distance(text.data() + (_tabLocations.empty() ? 0 : _tabLocations.back()), text.data() + i);
+
 						double x = CTLineGetOffsetForStringIndex(tmpLine, j, NULL);
 						double newX = (x - standardTabWidths + newTabWidths);
 						double stopLocation = (floor(newX / tabWidth)+1) * tabWidth;
@@ -172,8 +174,6 @@ namespace ct
 						_tabLocations.push_back(i);
 						break;
 				}
-				i += ch.length();
-				++j;
 			}
 
 			CFArrayRef tabStops = CFArrayCreate(kCFAllocatorDefault, (const void**) (&tabs[0]), tabs.size(), &kCFTypeArrayCallBacks);
