@@ -6,9 +6,9 @@ function error () { printf >&2 "%s\n\nPlease see README.md for build instruction
 # = Fallback build directory and signing identity =
 # =================================================
 
-: ${builddir:=$HOME/build/TextMate}
+: ${builddir:=$HOME/Project/Builds/TextMate}
 : ${identity:=-}
-: ${capnp_prefix:=/usr/local}
+: ${capnp_prefix:=/usr/local/}
 : ${rest_api:=https://api.textmate.org}
 : ${CC:=xcrun clang}
 : ${CXX:=xcrun clang++}
