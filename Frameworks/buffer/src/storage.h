@@ -15,16 +15,28 @@ namespace ng
 
 			struct helper_t
 			{
-				helper_t (size_t size) : _size(size) { _bytes = (char*)malloc(size + 15); }
-				~helper_t ()                         { ::free(_bytes); }
-				char* bytes ()                       { return _bytes; }
+				template <typename _InputIter>
+				helper_t (_InputIter first, _InputIter last)
+				{
+					_bytes = (char*)malloc(std::distance(first, last) + 15);
+					append(first, last);
+				}
+
+				~helper_t ()                         { free(_bytes); }
+				char const* bytes () const           { return _bytes; }
 				size_t size () const                 { return _size; }
-				size_t free () const                 { return malloc_size(_bytes) - _size; }
-				void grow (size_t amount)            { _size += amount; }
+				size_t available () const            { return malloc_size(_bytes) - _size; }
+
+				template <typename _InputIter>
+				void append (_InputIter first, _InputIter last)
+				{
+					std::copy(first, last, _bytes + _size);
+					_size += std::distance(first, last);
+				}
 
 			private:
 				char* _bytes;
-				size_t _size;
+				size_t _size = 0;
 			};
 
 			typedef std::shared_ptr<helper_t> helper_ptr;
@@ -37,7 +49,7 @@ namespace ng
 			memory_t subset (size_t from)                     { return memory_t(_helper, _offset + from); }
 			char const* bytes () const                        { return _helper->bytes() + _offset; }
 			size_t size () const                              { return _helper->size() - _offset; }
-			size_t free () const                              { return _helper->free(); }
+			size_t available () const                         { return _helper->available(); }
 
 			template <typename _InputIter>
 			void insert (size_t pos, _InputIter first, _InputIter last);
@@ -81,6 +93,9 @@ namespace ng
 			private:
 				typename oak::basic_tree_t<size_t, memory_t>::iterator _base;
 			};
+
+			bool operator== (storage_t const& rhs) const;
+			bool operator!= (storage_t const& rhs) const { return !(*this == rhs); }
 
 			size_t size () const       { return _tree.aggregated(); }
 			bool empty () const        { return _tree.empty(); }

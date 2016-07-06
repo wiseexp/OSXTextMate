@@ -235,10 +235,10 @@ namespace ng
 	// = Buffer Callback =
 	// ===================
 
-	void folds_t::will_replace (size_t from, size_t to, std::string const& str)
+	void folds_t::will_replace (size_t from, size_t to, char const* buf, size_t len)
 	{
 		std::vector< std::pair<size_t, size_t> > newFoldings;
-		ssize_t delta = str.size() - (to - from);
+		ssize_t delta = len - (to - from);
 		for(auto const& pair : _folded)
 		{
 			ssize_t foldFrom = pair.first, foldTo = pair.second;
@@ -251,48 +251,16 @@ namespace ng
 		}
 		set_folded(newFoldings);
 
-		size_t bol = _buffer.begin(_buffer.convert(from).line);
-		size_t end = _buffer.begin(_buffer.convert(to).line);
-		auto first = _levels.lower_bound(bol, &key_comp);
-		auto last  = _levels.upper_bound(end, &key_comp);
-		if(last != _levels.end())
-		{
-			ssize_t eraseFrom = first->offset;
-			ssize_t eraseTo   = last->offset;
-			ssize_t diff = (eraseTo - eraseFrom) + str.size() - (to - from);
-			last->key += diff;
-			_levels.update_key(last);
-		}
-		_levels.erase(first, last);
+		_levels.replace(from, to, len);
+		_levels.remove(_buffer.begin(_buffer.convert(from).line));
+		_levels.remove(_buffer.begin(_buffer.convert(to).line));
 	}
 
 	void folds_t::did_parse (size_t from, size_t to)
 	{
-		size_t bol = _buffer.begin(_buffer.convert(from).line);
-		size_t end = _buffer.begin(_buffer.convert(to).line);
-		auto first = _levels.lower_bound(bol, &key_comp);
-		auto last  = _levels.upper_bound(end, &key_comp);
-		if(last != _levels.end())
-		{
-			last->key += last->offset - first->offset;
-			_levels.update_key(last);
-		}
-		_levels.erase(first, last);
-	}
-
-	bool folds_t::integrity () const
-	{
-		for(auto const& info : _levels)
-		{
-			size_t pos = info.offset + info.key;
-			if(_buffer.size() < pos || _buffer.convert(pos).column != 0)
-			{
-				size_t n = _buffer.convert(pos).line;
-				fprintf(stderr, "%zu) pos: %zu, line %zu-%zu\n", n+1, pos, _buffer.begin(n), _buffer.eol(n));
-				return false;
-			}
-		}
-		return true;
+		auto fromIter = _levels.lower_bound(_buffer.begin(_buffer.convert(from).line));
+		auto toIter   = _levels.lower_bound(_buffer.begin(_buffer.convert(to).line));
+		_levels.remove(fromIter, toIter != _levels.end() ? ++toIter : toIter);
 	}
 
 	// ============
@@ -377,27 +345,24 @@ namespace ng
 
 	static void setup_patterns (ng::buffer_t const& buffer, size_t line, regexp::pattern_t& startPattern, regexp::pattern_t& stopPattern, regexp::pattern_t& indentPattern, regexp::pattern_t& ignorePattern)
 	{
-		plist::any_t ptrn;
+		struct { regexp::pattern_t& regexp; std::string setting; } mapping[] =
+		{
+			{ startPattern,  "foldingStartMarker"         },
+			{ stopPattern,   "foldingStopMarker"          },
+			{ indentPattern, "foldingIndentedBlockStart"  },
+			{ ignorePattern, "foldingIndentedBlockIgnore" },
+		};
 
-		bundles::item_ptr didFindPatterns;
 		scope::context_t scope(buffer.scope(buffer.begin(line), false).right, buffer.scope(buffer.end(line), false).left);
-		ptrn = bundles::value_for_setting("foldingStartMarker", scope, &didFindPatterns);
-		if(std::string const* str = boost::get<std::string>(&ptrn))
-			startPattern = *str;
+		for(auto info : mapping)
+		{
+			plist::any_t ptrn = bundles::value_for_setting(info.setting, scope);
+			if(std::string const* str = boost::get<std::string>(&ptrn))
+				info.regexp = *str;
+		}
 
-		ptrn = bundles::value_for_setting("foldingStopMarker", scope, &didFindPatterns);
-		if(std::string const* str = boost::get<std::string>(&ptrn))
-			stopPattern = *str;
-
-		ptrn = bundles::value_for_setting("foldingIndentedBlockStart", scope, &didFindPatterns);
-		if(std::string const* str = boost::get<std::string>(&ptrn))
-			indentPattern = *str;
-
-		ptrn = bundles::value_for_setting("foldingIndentedBlockIgnore", scope, &didFindPatterns);
-		if(std::string const* str = boost::get<std::string>(&ptrn))
-			ignorePattern = *str;
-
-		if(!didFindPatterns) // legacy — this has bad performance
+		// legacy — this has bad performance
+		if(!startPattern && !stopPattern && !indentPattern && !ignorePattern)
 		{
 			for(auto const& item : bundles::query(bundles::kFieldGrammarScope, to_s(buffer.scope(0, false).left), scope::wildcard, bundles::kItemTypeGrammar))
 			{
@@ -413,41 +378,28 @@ namespace ng
 	folds_t::value_t folds_t::info_for (size_t n) const
 	{
 		size_t bol = _buffer.begin(n);
-		auto it = _levels.lower_bound(bol, &key_comp);
-		if(it == _levels.end() || it->offset + it->key != bol)
-		{
-			if(it != _levels.end())
-			{
-				bol -= it->offset;
-				it->key -= bol;
-				_levels.update_key(it);
-			}
-			else if(it != _levels.begin())
-			{
-				auto tmp = it;
-				--tmp;
-				bol -= tmp->offset + tmp->key;
-			}
+		auto it = _levels.find(bol);
+		if(it != _levels.end())
+			return it->second;
 
-			regexp::pattern_t startPattern, stopPattern, indentPattern, ignorePattern;
-			setup_patterns(_buffer, n, startPattern, stopPattern, indentPattern, ignorePattern);
+		regexp::pattern_t startPattern, stopPattern, indentPattern, ignorePattern;
+		setup_patterns(_buffer, n, startPattern, stopPattern, indentPattern, ignorePattern);
 
-			std::string const line = _buffer.substr(_buffer.begin(n), _buffer.eol(n));
+		std::string const line = _buffer.substr(bol, _buffer.eol(n));
 
-			value_t info;
-			info.start_marker        = !!regexp::search(startPattern,  line);
-			info.stop_marker         = !!regexp::search(stopPattern,   line);
-			info.indent_start_marker = !!regexp::search(indentPattern, line);
-			info.ignore_line         = !!regexp::search(ignorePattern, line);
-			info.empty_line          = text::is_blank(line.data(), line.data() + line.size());
-			info.indent              = indent::leading_whitespace(line.data(), line.data() + line.size(), _buffer.indent().tab_size());
+		value_t info;
+		info.start_marker        = !!regexp::search(startPattern,  line);
+		info.stop_marker         = !!regexp::search(stopPattern,   line);
+		info.indent_start_marker = !!regexp::search(indentPattern, line);
+		info.ignore_line         = !!regexp::search(ignorePattern, line);
+		info.empty_line          = text::is_blank(line.data(), line.data() + line.size());
+		info.indent              = indent::leading_whitespace(line.data(), line.data() + line.size(), _buffer.indent().tab_size());
 
-			if(info.start_marker || info.stop_marker)
-				info.indent_start_marker = false;
+		if(info.start_marker || info.stop_marker)
+			info.indent_start_marker = false;
 
-			it = _levels.insert(it, bol, info);
-		}
-		return it->value;
+		_levels.set(bol, info);
+		return info;
 	}
 
 } /* ng */

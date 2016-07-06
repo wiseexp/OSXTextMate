@@ -5,6 +5,8 @@
 @property (nonatomic, weak) FFResultNode* parent;
 @property (nonatomic, readonly) NSUInteger countOfLeafs;
 @property (nonatomic, readonly) NSUInteger countOfExcluded;
+@property (nonatomic, readonly) NSUInteger countOfReadOnly;
+@property (nonatomic, readonly) NSUInteger countOfExcludedReadOnly;
 
 + (FFResultNode*)resultNodeWithMatch:(find::match_t const&)aMatch baseDirectory:(NSString*)base;
 + (FFResultNode*)resultNodeWithMatch:(find::match_t const&)aMatch;
@@ -22,7 +24,7 @@
 @property (nonatomic) NSString* replaceString;
 @property (nonatomic) NSArray* children;
 @property (nonatomic) BOOL excluded;
-@property (nonatomic) BOOL ignored;
+@property (nonatomic, getter = isReadOnly) BOOL readOnly;
 @property (nonatomic) NSImage* icon;
 
 @property (nonatomic, readonly) find::match_t const& match;

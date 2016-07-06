@@ -2,7 +2,7 @@
 #import <OakAppKit/OakUIConstructionFunctions.h>
 #import <OakFoundation/OakFoundation.h>
 #import <OakFoundation/NSString Additions.h>
-#import <updater/updater.h>
+#import <BundlesManager/BundlesManager.h>
 #import <license/license.h>
 #import <ns/ns.h>
 
@@ -267,13 +267,11 @@ static NSTextField* OakCreateTextField ()
 		{
 			NSData* lastDigest    = [[NSUserDefaults standardUserDefaults] dataForKey:kUserDefaultsReleaseNotesDigestKey];
 			NSData* currentDigest = Digest(releaseNotes);
-			if(lastDigest && ![lastDigest isEqualToData:currentDigest])
-			{
-				dispatch_async(dispatch_get_main_queue(), ^{
+			dispatch_async(dispatch_get_main_queue(), ^{
+				if(lastDigest && ![lastDigest isEqualToData:currentDigest])
 					[[AboutWindowController sharedInstance] showChangesWindow:self];
-					[[NSUserDefaults standardUserDefaults] setObject:currentDigest forKey:kUserDefaultsReleaseNotesDigestKey];
-				});
-			}
+				[[NSUserDefaults standardUserDefaults] setObject:currentDigest forKey:kUserDefaultsReleaseNotesDigestKey];
+			});
 		}
 	});
 }
@@ -426,7 +424,7 @@ static NSTextField* OakCreateTextField ()
 
 // ====================
 
-- (void)updateGoToMenu:(NSMenu*)aMenu
+- (void)updateSelectTabMenu:(NSMenu*)aMenu
 {
 	if(![[self window] isKeyWindow])
 	{
@@ -477,10 +475,13 @@ static NSDictionary* RemoveOldCommits (NSDictionary* src)
 
 	bool first = true;
 	NSMutableString* str = [NSMutableString stringWithString:@"{\"bundles\":["];
-	for(std::string path : bundles_db::release_notes())
+	for(Bundle* bundle in [BundlesManager sharedInstance].bundles)
 	{
+		if(!bundle.installed || !bundle.path)
+			continue;
+
 		NSError* err = NULL;
-		if(NSString* content = [NSString stringWithContentsOfFile:[NSString stringWithCxxString:path] encoding:NSUTF8StringEncoding error:&err])
+		if(NSString* content = [NSString stringWithContentsOfFile:[bundle.path stringByAppendingPathComponent:@"Changes.json"] encoding:NSUTF8StringEncoding error:&err])
 		{
 			if(NSDictionary* obj = [NSJSONSerialization JSONObjectWithData:[content dataUsingEncoding:NSUTF8StringEncoding] options:0 error:&err])
 			{
@@ -494,7 +495,7 @@ static NSDictionary* RemoveOldCommits (NSDictionary* src)
 				}
 			}
 		}
-		NSLog(@"%s: %@", path.c_str(), err.localizedDescription);
+		NSLog(@"%@: %@", bundle.name, err.localizedDescription);
 	}
 	[str appendString:@"]}"];
 

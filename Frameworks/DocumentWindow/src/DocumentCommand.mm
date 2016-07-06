@@ -64,7 +64,7 @@ ng::ranges_t delegate_t::write_unit_to_fd (int fd, input::type unit, input::type
 	bool isOpen = _document->is_open();
 	if(!isOpen)
 		_document->sync_open();
-	ng::ranges_t const res = ng::write_unit_to_fd(_document->buffer(), ng::editor_for_document(_document)->ranges(), _document->buffer().indent().tab_size(), fd, unit, fallbackUnit, format, scopeSelector, variables, inputWasSelection);
+	ng::ranges_t const res = ng::write_unit_to_fd(_document->buffer(), ng::editor_for_document(_document)->ranges(), _document->indent().tab_size(), fd, unit, fallbackUnit, format, scopeSelector, variables, inputWasSelection);
 	if(!isOpen)
 		_document->close();
 	return res;
@@ -134,7 +134,7 @@ void delegate_t::show_error (bundle_command_t const& command, int rc, std::strin
 // = Public API =
 // ==============
 
-void run_impl (bundle_command_t const& command, ng::buffer_t const& buffer, ng::ranges_t const& selection, document::document_ptr document, std::map<std::string, std::string> baseEnv, std::string const& pwd)
+void run_impl (bundle_command_t const& command, ng::buffer_api_t const& buffer, ng::ranges_t const& selection, document::document_ptr document, std::map<std::string, std::string> baseEnv, std::string const& pwd)
 {
 	DocumentController* controller = [DocumentController controllerForDocument:document];
 	if(controller && command.output == output::new_window && command.output_format == output_format::html)

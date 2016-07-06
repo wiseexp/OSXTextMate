@@ -190,7 +190,7 @@ static bool is_binary (std::string const& path)
 	_outlineView.menu = [NSMenu new];
 	_outlineView.menu.delegate = self;
 
-	if([[[[NSUserDefaults standardUserDefaults] objectForKey:kUserDefaultsFileBrowserStyleKey] lowercaseString] isEqualToString:@"sourcelist"])
+	if([[[[NSUserDefaults standardUserDefaults] stringForKey:kUserDefaultsFileBrowserStyleKey] lowercaseString] isEqualToString:@"sourcelist"])
 		_outlineView.renderAsSourceList = YES;
 
 	[_outlineView setDraggingSourceOperationMask:NSDragOperationCopy|NSDragOperationMove|NSDragOperationLink forLocal:YES];
@@ -906,12 +906,6 @@ static bool is_binary (std::string const& path)
 		}
 	}
 
-	if([selectedItems count])
-	{
-		[aMenu addItem:[NSMenuItem separatorItem]];
-		[aMenu addItemWithTitle:@"Select None" action:@selector(deselectAll:) keyEquivalent:@"A"];
-	}
-
 	if(hasFileSelected || self.canPaste)
 	{
 		[aMenu addItem:[NSMenuItem separatorItem]];
@@ -1230,7 +1224,7 @@ static bool is_binary (std::string const& path)
 - (BOOL)validateMenuItem:(NSMenuItem*)item
 {
 	BOOL res = YES;
-	static std::set<SEL> const requireSelection{ @selector(didDoubleClickOutlineView:), @selector(editSelectedEntries:), @selector(duplicateSelectedEntries:), @selector(cut:), @selector(copy:), @selector(delete:) };
+	static std::set<SEL> const requireSelection{ @selector(didDoubleClickOutlineView:), @selector(editSelectedEntries:), @selector(duplicateSelectedEntries:), @selector(cut:), @selector(copy:), @selector(delete:), @selector(deselectAll:) };
 
 	NSUInteger selectedFiles = 0;
 	struct stat buf;

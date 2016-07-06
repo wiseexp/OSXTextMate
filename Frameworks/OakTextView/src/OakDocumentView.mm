@@ -8,10 +8,10 @@
 #import <ns/ns.h>
 #import <oak/debug.h>
 #import <bundles/bundles.h>
+#import <settings/settings.h>
 #import <OakFilterList/SymbolChooser.h>
 #import <OakFoundation/NSString Additions.h>
 #import <OakAppKit/OakAppKit.h>
-#import <OakAppKit/NSColor Additions.h>
 #import <OakAppKit/NSImage Additions.h>
 #import <OakAppKit/OakToolTip.h>
 #import <OakAppKit/OakPasteboard.h>
@@ -23,6 +23,7 @@
 OAK_DEBUG_VAR(OakDocumentView);
 
 static NSString* const kUserDefaultsLineNumberScaleFactorKey = @"lineNumberScaleFactor";
+static NSString* const kUserDefaultsLineNumberFontNameKey    = @"lineNumberFontName";
 
 static NSString* const kBookmarksColumnIdentifier = @"bookmarks";
 static NSString* const kFoldingsColumnIdentifier  = @"foldings";
@@ -50,8 +51,6 @@ static NSString* const kFoldingsColumnIdentifier  = @"foldings";
 	OakBackgroundFillView* statusDividerView;
 
 	NSScrollView* textScrollView;
-	OakTextView* textView;
-	OTVStatusBar* statusBar;
 	document::document_ptr document;
 	document::document_t::callback_t* callback;
 
@@ -78,19 +77,12 @@ struct document_view_callback_t : document::document_t::callback_t
 		}
 		else if(event == did_change_file_type)
 		{
-			for(auto const& item : bundles::query(bundles::kFieldGrammarScope, document->file_type()))
-				self.statusBar.grammarName = [NSString stringWithCxxString:item->name()];
+			self.statusBar.fileType = [NSString stringWithCxxString:document->file_type()];
 		}
 		else if(event == did_change_indent_settings)
 		{
-			self.statusBar.tabSize  = document->buffer().indent().tab_size();
-			self.statusBar.softTabs = document->buffer().indent().soft_tabs();
-		}
-
-		if(document->recent_tracking() && path::exists(document->path()))
-		{
-			if(event == did_save || event == did_change_path || (event == did_change_open_status && document->is_open()))
-				[[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:[NSString stringWithCxxString:document->path()]]];
+			self.statusBar.tabSize  = document->indent().tab_size();
+			self.statusBar.softTabs = document->indent().soft_tabs();
 		}
 	}
 private:
@@ -98,8 +90,6 @@ private:
 };
 
 @implementation OakDocumentView
-@synthesize textView, statusBar;
-
 - (id)initWithFrame:(NSRect)aRect
 {
 	D(DBF_OakDocumentView, bug("%s\n", [NSStringFromRect(aRect) UTF8String]););
@@ -107,18 +97,18 @@ private:
 	{
 		callback = new document_view_callback_t(self);
 
-		textView = [[OakTextView alloc] initWithFrame:NSZeroRect];
-		textView.autoresizingMask = NSViewWidthSizable|NSViewHeightSizable;
+		_textView = [[OakTextView alloc] initWithFrame:NSZeroRect];
+		_textView.autoresizingMask = NSViewWidthSizable|NSViewHeightSizable;
 
 		textScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
 		textScrollView.hasVerticalScroller   = YES;
 		textScrollView.hasHorizontalScroller = YES;
 		textScrollView.autohidesScrollers    = YES;
 		textScrollView.borderType            = NSNoBorder;
-		textScrollView.documentView          = textView;
+		textScrollView.documentView          = _textView;
 
 		gutterView = [[GutterView alloc] initWithFrame:NSZeroRect];
-		gutterView.partnerView = textView;
+		gutterView.partnerView = _textView;
 		gutterView.delegate    = self;
 		[gutterView insertColumnWithIdentifier:kBookmarksColumnIdentifier atPosition:0 dataSource:self delegate:self];
 		[gutterView insertColumnWithIdentifier:kFoldingsColumnIdentifier atPosition:2 dataSource:self delegate:self];
@@ -133,12 +123,12 @@ private:
 		gutterDividerView = OakCreateVerticalLine(nil);
 		statusDividerView = OakCreateHorizontalLine([NSColor colorWithCalibratedWhite:0.500 alpha:1], [NSColor colorWithCalibratedWhite:0.750 alpha:1]);
 
-		statusBar = [[OTVStatusBar alloc] initWithFrame:NSZeroRect];
-		statusBar.delegate = self;
-		statusBar.target = self;
+		_statusBar = [[OTVStatusBar alloc] initWithFrame:NSZeroRect];
+		_statusBar.delegate = self;
+		_statusBar.target = self;
 
-		OakAddAutoLayoutViewsToSuperview(@[ gutterScrollView, gutterDividerView, textScrollView, statusDividerView, statusBar ], self);
-		OakSetupKeyViewLoop(@[ self, textView, statusBar ], NO);
+		OakAddAutoLayoutViewsToSuperview(@[ gutterScrollView, gutterDividerView, textScrollView, statusDividerView, _statusBar ], self);
+		OakSetupKeyViewLoop(@[ self, _textView, _statusBar ], NO);
 
 		document::document_ptr doc = document::from_content("", "text.plain"); // file type is only to avoid potential “no grammar” warnings in console
 		doc->set_custom_name("null document"); // without a name it grabs an ‘untitled’ token
@@ -146,7 +136,7 @@ private:
 
 		self.observedKeys = @[ @"selectionString", @"tabSize", @"softTabs", @"isMacroRecording"];
 		for(NSString* keyPath in self.observedKeys)
-			[textView addObserver:self forKeyPath:keyPath options:NSKeyValueObservingOptionInitial context:NULL];
+			[_textView addObserver:self forKeyPath:keyPath options:NSKeyValueObservingOptionInitial context:NULL];
 	}
 	return self;
 }
@@ -166,10 +156,10 @@ private:
 	[stackedViews addObject:gutterScrollView];
 	[stackedViews addObjectsFromArray:bottomAuxiliaryViews];
 
-	if(statusBar)
+	if(_statusBar)
 	{
-		[stackedViews addObjectsFromArray:@[ statusDividerView, statusBar ]];
-		[self addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[statusBar(==statusDividerView)]|" options:NSLayoutFormatAlignAllLeft|NSLayoutFormatAlignAllRight metrics:nil views:NSDictionaryOfVariableBindings(statusDividerView, statusBar)]];
+		[stackedViews addObjectsFromArray:@[ statusDividerView, _statusBar ]];
+		[self addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[_statusBar(==statusDividerView)]|" options:NSLayoutFormatAlignAllLeft|NSLayoutFormatAlignAllRight metrics:nil views:NSDictionaryOfVariableBindings(statusDividerView, _statusBar)]];
 	}
 
 	[self addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[gutterScrollView(==gutterView)][gutterDividerView][textScrollView(>=100)]|" options:NSLayoutFormatAlignAllTop|NSLayoutFormatAlignAllBottom metrics:nil views:NSDictionaryOfVariableBindings(gutterScrollView, gutterView, gutterDividerView, textScrollView)]];
@@ -198,27 +188,27 @@ private:
 		[statusDividerView removeFromSuperview];
 		statusDividerView = nil;
 
-		[statusBar removeFromSuperview];
-		statusBar.delegate = nil;
-		statusBar.target = nil;
-		statusBar = nil;
+		[_statusBar removeFromSuperview];
+		_statusBar.delegate = nil;
+		_statusBar.target = nil;
+		_statusBar = nil;
 	}
 	else
 	{
 		statusDividerView = OakCreateHorizontalLine([NSColor colorWithCalibratedWhite:0.500 alpha:1], [NSColor colorWithCalibratedWhite:0.750 alpha:1]);
 
-		statusBar = [[OTVStatusBar alloc] initWithFrame:NSZeroRect];
-		statusBar.delegate = self;
-		statusBar.target = self;
+		_statusBar = [[OTVStatusBar alloc] initWithFrame:NSZeroRect];
+		_statusBar.delegate = self;
+		_statusBar.target = self;
 
-		OakAddAutoLayoutViewsToSuperview(@[ statusDividerView, statusBar ], self);
+		OakAddAutoLayoutViewsToSuperview(@[ statusDividerView, _statusBar ], self);
 	}
 	[self setNeedsUpdateConstraints:YES];
 }
 
 - (CGFloat)lineHeight
 {
-	return round(std::min(1.5 * [textView.font capHeight], [textView.font ascender] - [textView.font descender] + [textView.font leading]));
+	return round(std::min(1.5 * [_textView.font capHeight], [_textView.font ascender] - [_textView.font descender] + [_textView.font leading]));
 }
 
 - (NSImage*)gutterImage:(NSString*)aName
@@ -263,72 +253,78 @@ private:
 - (void)updateGutterViewFont:(id)sender
 {
 	CGFloat const scaleFactor = [[NSUserDefaults standardUserDefaults] floatForKey:kUserDefaultsLineNumberScaleFactorKey] ?: 0.8;
+	NSString* lineNumberFontName = [[NSUserDefaults standardUserDefaults] stringForKey:kUserDefaultsLineNumberFontNameKey] ?: [_textView.font fontName];
 
 	gutterImages = nil; // force image sizes to be recalculated
-	gutterView.lineNumberFont = [NSFont fontWithName:[textView.font fontName] size:round(scaleFactor * [textView.font pointSize] * textView.fontScaleFactor / 100)];
+	gutterView.lineNumberFont = [NSFont fontWithName:lineNumberFontName size:round(scaleFactor * [_textView.font pointSize] * _textView.fontScaleFactor / 100)];
 	[gutterView reloadData:self];
 }
 
 - (IBAction)makeTextLarger:(id)sender
 {
-	textView.fontScaleFactor += 10;
+	_textView.fontScaleFactor += 10;
 	[self updateGutterViewFont:self];
 }
 
 - (IBAction)makeTextSmaller:(id)sender
 {
-	if(textView.fontScaleFactor > 10)
+	if(_textView.fontScaleFactor > 10)
 	{
-		textView.fontScaleFactor -= 10;
+		_textView.fontScaleFactor -= 10;
 		[self updateGutterViewFont:self];
 	}
 }
 
 - (IBAction)makeTextStandardSize:(id)sender
 {
-	textView.fontScaleFactor = 100;
+	_textView.fontScaleFactor = 100;
 	[self updateGutterViewFont:self];
 }
 
 - (void)changeFont:(id)sender
 {
-	if(NSFont* newFont = [sender convertFont:textView.font ?: [NSFont userFixedPitchFontOfSize:0]])
+	NSFont* defaultFont = [NSFont userFixedPitchFontOfSize:0];
+	if(NSFont* newFont = [sender convertFont:_textView.font ?: defaultFont])
 	{
-		settings_t::set(kSettingsFontNameKey, to_s([newFont fontName]));
+		std::string fontName = [newFont.fontName isEqualToString:defaultFont.fontName] ? NULL_STR : to_s(newFont.fontName);
+		settings_t::set(kSettingsFontNameKey, fontName);
 		settings_t::set(kSettingsFontSizeKey, [newFont pointSize]);
-		textView.font = newFont;
+		_textView.font = newFont;
 		[self updateGutterViewFont:self];
 	}
 }
 
 - (void)observeValueForKeyPath:(NSString*)aKeyPath ofObject:(id)observableController change:(NSDictionary*)changeDictionary context:(void*)userData
 {
-	if(observableController != textView || ![self.observedKeys containsObject:aKeyPath])
+	if(observableController != _textView || ![self.observedKeys containsObject:aKeyPath])
 		return;
 
 	if([aKeyPath isEqualToString:@"selectionString"])
 	{
-		NSString* str = [textView valueForKey:@"selectionString"];
+		NSString* str = [_textView valueForKey:@"selectionString"];
 		[gutterView setHighlightedRange:to_s(str ?: @"1")];
-		[statusBar setSelectionString:str];
+		[_statusBar setSelectionString:str];
 		_symbolChooser.selectionString = str;
 
-		ng::buffer_t const& buf = document->buffer();
-		text::selection_t sel(to_s(str));
-		size_t i = buf.convert(sel.last().max());
-		statusBar.symbolName = [NSString stringWithCxxString:buf.symbol_at(i)];
+		if(document)
+		{
+			ng::buffer_t const& buf = document->buffer();
+			text::selection_t sel(to_s(str));
+			size_t i = buf.convert(sel.last().max());
+			_statusBar.symbolName = [NSString stringWithCxxString:buf.symbol_at(i)];
+		}
 	}
 	else if([aKeyPath isEqualToString:@"tabSize"])
 	{
-		statusBar.tabSize = textView.tabSize;
+		_statusBar.tabSize = _textView.tabSize;
 	}
 	else if([aKeyPath isEqualToString:@"softTabs"])
 	{
-		statusBar.softTabs = textView.softTabs;
+		_statusBar.softTabs = _textView.softTabs;
 	}
 	else
 	{
-		[statusBar setValue:[textView valueForKey:aKeyPath] forKey:aKeyPath];
+		[_statusBar setValue:[_textView valueForKey:aKeyPath] forKey:aKeyPath];
 	}
 }
 
@@ -336,10 +332,10 @@ private:
 {
 	gutterView.partnerView = nil;
 	gutterView.delegate    = nil;
-	statusBar.delegate     = nil;
+	_statusBar.delegate    = nil;
 
 	for(NSString* keyPath in self.observedKeys)
-		[textView removeObserver:self forKeyPath:keyPath];
+		[_textView removeObserver:self forKeyPath:keyPath];
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 
 	[self setDocument:document::document_ptr()];
@@ -367,20 +363,19 @@ private:
 		document->add_callback(callback);
 		document->show();
 
-		for(auto const& item : bundles::query(bundles::kFieldGrammarScope, document->file_type()))
-			statusBar.grammarName = [NSString stringWithCxxString:item->name()];
-		statusBar.tabSize  = document->buffer().indent().tab_size();
-		statusBar.softTabs = document->buffer().indent().soft_tabs();
+		_statusBar.fileType = [NSString stringWithCxxString:document->file_type()];
+		_statusBar.tabSize  = document->indent().tab_size();
+		_statusBar.softTabs = document->indent().soft_tabs();
 	}
 
-	[textView setDocument:document];
+	[_textView setDocument:document];
 	[gutterView reloadData:self];
 	[self updateStyle];
 
 	if(_symbolChooser)
 	{
-		_symbolChooser.document        = document;
-		_symbolChooser.selectionString = textView.selectionString;
+		_symbolChooser.document        = document->document();
+		_symbolChooser.selectionString = _textView.selectionString;
 	}
 
 	if(oldDocument)
@@ -392,42 +387,41 @@ private:
 
 - (void)updateStyle
 {
-	if(document && [textView theme])
+	theme_ptr theme = _textView.theme;
+	if(theme && document)
 	{
-		auto theme = [textView theme];
-
 		[[self window] setOpaque:!theme->is_transparent() && !theme->gutter_styles().is_transparent()];
-		[textScrollView setBackgroundColor:[NSColor tmColorWithCGColor:theme->background(document->file_type())]];
+		[textScrollView setBackgroundColor:[NSColor colorWithCGColor:theme->background(document->file_type())]];
 
 		if(theme->is_dark())
 		{
 			NSImage* whiteIBeamImage = [NSImage imageNamed:@"IBeam white" inSameBundleAsClass:[self class]];
 			[whiteIBeamImage setSize:[[[NSCursor IBeamCursor] image] size]];
-			[textView setIbeamCursor:[[NSCursor alloc] initWithImage:whiteIBeamImage hotSpot:NSMakePoint(4, 9)]];
+			[_textView setIbeamCursor:[[NSCursor alloc] initWithImage:whiteIBeamImage hotSpot:NSMakePoint(4, 9)]];
 			[textScrollView setScrollerKnobStyle:NSScrollerKnobStyleLight];
 		}
 		else
 		{
-			[textView setIbeamCursor:[NSCursor IBeamCursor]];
+			[_textView setIbeamCursor:[NSCursor IBeamCursor]];
 			[textScrollView setScrollerKnobStyle:NSScrollerKnobStyleDark];
 		}
 
 		[self updateGutterViewFont:self]; // trigger update of gutter view’s line number font
 		auto const& styles = theme->gutter_styles();
 
-		gutterView.foregroundColor           = [NSColor tmColorWithCGColor:styles.foreground];
-		gutterView.backgroundColor           = [NSColor tmColorWithCGColor:styles.background];
-		gutterView.iconColor                 = [NSColor tmColorWithCGColor:styles.icons];
-		gutterView.iconHoverColor            = [NSColor tmColorWithCGColor:styles.iconsHover];
-		gutterView.iconPressedColor          = [NSColor tmColorWithCGColor:styles.iconsPressed];
-		gutterView.selectionForegroundColor  = [NSColor tmColorWithCGColor:styles.selectionForeground];
-		gutterView.selectionBackgroundColor  = [NSColor tmColorWithCGColor:styles.selectionBackground];
-		gutterView.selectionIconColor        = [NSColor tmColorWithCGColor:styles.selectionIcons];
-		gutterView.selectionIconHoverColor   = [NSColor tmColorWithCGColor:styles.selectionIconsHover];
-		gutterView.selectionIconPressedColor = [NSColor tmColorWithCGColor:styles.selectionIconsPressed];
-		gutterView.selectionBorderColor      = [NSColor tmColorWithCGColor:styles.selectionBorder];
+		gutterView.foregroundColor           = [NSColor colorWithCGColor:styles.foreground];
+		gutterView.backgroundColor           = [NSColor colorWithCGColor:styles.background];
+		gutterView.iconColor                 = [NSColor colorWithCGColor:styles.icons];
+		gutterView.iconHoverColor            = [NSColor colorWithCGColor:styles.iconsHover];
+		gutterView.iconPressedColor          = [NSColor colorWithCGColor:styles.iconsPressed];
+		gutterView.selectionForegroundColor  = [NSColor colorWithCGColor:styles.selectionForeground];
+		gutterView.selectionBackgroundColor  = [NSColor colorWithCGColor:styles.selectionBackground];
+		gutterView.selectionIconColor        = [NSColor colorWithCGColor:styles.selectionIcons];
+		gutterView.selectionIconHoverColor   = [NSColor colorWithCGColor:styles.selectionIconsHover];
+		gutterView.selectionIconPressedColor = [NSColor colorWithCGColor:styles.selectionIconsPressed];
+		gutterView.selectionBorderColor      = [NSColor colorWithCGColor:styles.selectionBorder];
 		gutterScrollView.backgroundColor     = gutterView.backgroundColor;
-		gutterDividerView.activeBackgroundColor = [NSColor tmColorWithCGColor:styles.divider];
+		gutterDividerView.activeBackgroundColor = [NSColor colorWithCGColor:styles.divider];
 
 		[gutterView setNeedsDisplay:YES];
 	}
@@ -448,27 +442,27 @@ private:
 	if([aMenuItem action] == @selector(toggleLineNumbers:))
 		[aMenuItem setTitle:[gutterView visibilityForColumnWithIdentifier:GVLineNumbersColumnIdentifier] ? @"Hide Line Numbers" : @"Show Line Numbers"];
 	else if([aMenuItem action] == @selector(takeThemeUUIDFrom:))
-		[aMenuItem setState:[textView theme]->uuid() == [[aMenuItem representedObject] UTF8String] ? NSOnState : NSOffState];
+		[aMenuItem setState:_textView.theme && _textView.theme->uuid() == [[aMenuItem representedObject] UTF8String] ? NSOnState : NSOffState];
 	else if([aMenuItem action] == @selector(takeTabSizeFrom:))
-		[aMenuItem setState:textView.tabSize == [aMenuItem tag] ? NSOnState : NSOffState];
+		[aMenuItem setState:_textView.tabSize == [aMenuItem tag] ? NSOnState : NSOffState];
 	else if([aMenuItem action] == @selector(showTabSizeSelectorPanel:))
 	{
 		static NSInteger const predefined[] = { 2, 3, 4, 8 };
-		if(oak::contains(std::begin(predefined), std::end(predefined), textView.tabSize))
+		if(oak::contains(std::begin(predefined), std::end(predefined), _textView.tabSize))
 		{
 			[aMenuItem setTitle:@"Other…"];
 			[aMenuItem setState:NSOffState];
 		}
 		else
 		{
-			[aMenuItem setTitle:[NSString stringWithFormat:@"Other (%zd)…", textView.tabSize]];
+			[aMenuItem setTitle:[NSString stringWithFormat:@"Other (%zd)…", _textView.tabSize]];
 			[aMenuItem setState:NSOnState];
 		}
 	}
 	else if([aMenuItem action] == @selector(setIndentWithTabs:))
-		[aMenuItem setState:textView.softTabs ? NSOffState : NSOnState];
+		[aMenuItem setState:_textView.softTabs ? NSOffState : NSOnState];
 	else if([aMenuItem action] == @selector(setIndentWithSpaces:))
-		[aMenuItem setState:textView.softTabs ? NSOnState : NSOffState];
+		[aMenuItem setState:_textView.softTabs ? NSOnState : NSOffState];
 	else if([aMenuItem action] == @selector(takeGrammarUUIDFrom:))
 	{
 		NSString* uuidString = [aMenuItem representedObject];
@@ -480,7 +474,7 @@ private:
 	}
 	else if([aMenuItem action] == @selector(toggleCurrentBookmark:))
 	{
-		text::selection_t sel(to_s(textView.selectionString));
+		text::selection_t sel(to_s(_textView.selectionString));
 		size_t lineNumber = sel.last().max().line;
 
 		ng::buffer_t const& buf = document->buffer();
@@ -534,14 +528,14 @@ private:
 {
 	OakPasteboardChooser* chooser = [OakPasteboardChooser sharedChooserForName:NSGeneralPboard];
 	chooser.action = @selector(paste:);
-	[chooser showWindowRelativeToFrame:[self.window convertRectToScreen:[textView convertRect:[textView visibleRect] toView:nil]]];
+	[chooser showWindowRelativeToFrame:[self.window convertRectToScreen:[_textView convertRect:[_textView visibleRect] toView:nil]]];
 }
 
 - (void)showFindHistory:(id)sender
 {
 	OakPasteboardChooser* chooser = [OakPasteboardChooser sharedChooserForName:NSFindPboard];
 	chooser.action = @selector(findNext:);
-	[chooser showWindowRelativeToFrame:[self.window convertRectToScreen:[textView convertRect:[textView visibleRect] toView:nil]]];
+	[chooser showWindowRelativeToFrame:[self.window convertRectToScreen:[_textView convertRect:[_textView visibleRect] toView:nil]]];
 }
 
 // ==================
@@ -550,8 +544,8 @@ private:
 
 - (void)selectAndCenter:(NSString*)aSelectionString
 {
-	textView.selectionString = aSelectionString;
-	[textView centerSelectionInVisibleArea:self];
+	_textView.selectionString = aSelectionString;
+	[_textView centerSelectionInVisibleArea:self];
 }
 
 - (void)setSymbolChooser:(SymbolChooser*)aSymbolChooser
@@ -564,7 +558,7 @@ private:
 		[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowWillCloseNotification object:_symbolChooser.window];
 
 		_symbolChooser.target   = nil;
-		_symbolChooser.document = document::document_ptr();
+		_symbolChooser.document = nil;
 	}
 
 	if(_symbolChooser = aSymbolChooser)
@@ -572,8 +566,8 @@ private:
 		_symbolChooser.target          = self;
 		_symbolChooser.action          = @selector(symbolChooserDidSelectItems:);
 		_symbolChooser.filterString    = @"";
-		_symbolChooser.document        = document;
-		_symbolChooser.selectionString = textView.selectionString;
+		_symbolChooser.document        = document->document();
+		_symbolChooser.selectionString = _textView.selectionString;
 
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(symbolChooserWillClose:) name:NSWindowWillCloseNotification object:_symbolChooser.window];
 	}
@@ -587,7 +581,7 @@ private:
 - (IBAction)showSymbolChooser:(id)sender
 {
 	self.symbolChooser = [SymbolChooser sharedInstance];
-	[self.symbolChooser showWindowRelativeToFrame:[self.window convertRectToScreen:[textView convertRect:[textView visibleRect] toView:nil]]];
+	[self.symbolChooser showWindowRelativeToFrame:[self.window convertRectToScreen:[_textView convertRect:[_textView visibleRect] toView:nil]]];
 }
 
 - (void)symbolChooserDidSelectItems:(id)sender
@@ -603,7 +597,7 @@ private:
 - (void)takeGrammarUUIDFrom:(id)sender
 {
 	if(bundles::item_ptr item = bundles::lookup(to_s([sender representedObject])))
-		[textView performBundleItem:item];
+		[_textView performBundleItem:item];
 }
 
 - (void)goToSymbol:(id)sender
@@ -617,7 +611,7 @@ private:
 	[symbolMenu removeAllItems];
 
 	ng::buffer_t const& buf = document->buffer();
-	text::selection_t sel(to_s(textView.selectionString));
+	text::selection_t sel(to_s(_textView.selectionString));
 	size_t i = buf.convert(sel.last().max());
 
 	NSInteger index = 0;
@@ -697,12 +691,12 @@ private:
 
 - (NSUInteger)tabSize
 {
-	return textView.tabSize;
+	return _textView.tabSize;
 }
 
 - (void)setTabSize:(NSUInteger)newTabSize
 {
-	textView.tabSize = newTabSize;
+	_textView.tabSize = newTabSize;
 	settings_t::set(kSettingsTabSizeKey, (size_t)newTabSize, document->file_type());
 }
 
@@ -717,14 +711,14 @@ private:
 - (IBAction)setIndentWithSpaces:(id)sender
 {
 	D(DBF_OakDocumentView, bug("\n"););
-	textView.softTabs = YES;
+	_textView.softTabs = YES;
 	settings_t::set(kSettingsSoftTabsKey, true, document->file_type());
 }
 
 - (IBAction)setIndentWithTabs:(id)sender
 {
 	D(DBF_OakDocumentView, bug("\n"););
-	textView.softTabs = NO;
+	_textView.softTabs = NO;
 	settings_t::set(kSettingsSoftTabsKey, false, document->file_type());
 }
 
@@ -735,7 +729,7 @@ private:
 	[tabSizeSelectorPanel makeKeyAndOrderFront:self];
 }
 
-- (void)toggleMacroRecording:(id)sender    { [textView toggleMacroRecording:sender]; }
+- (void)toggleMacroRecording:(id)sender    { [_textView toggleMacroRecording:sender]; }
 
 - (IBAction)takeThemeUUIDFrom:(id)sender
 {
@@ -746,7 +740,7 @@ private:
 {
 	if(bundles::item_ptr const& themeItem = bundles::lookup(to_s(themeUUID)))
 	{
-		[textView setTheme:parse_theme(themeItem)];
+		_textView.theme = parse_theme(themeItem);
 		settings_t::set(kSettingsThemeKey, to_s(themeUUID));
 		[self updateStyle];
 	}
@@ -756,8 +750,8 @@ private:
 // = GutterView Delegate Proxy =
 // =============================
 
-- (GVLineRecord)lineRecordForPosition:(CGFloat)yPos                              { return [textView lineRecordForPosition:yPos];               }
-- (GVLineRecord)lineFragmentForLine:(NSUInteger)aLine column:(NSUInteger)aColumn { return [textView lineFragmentForLine:aLine column:aColumn]; }
+- (GVLineRecord)lineRecordForPosition:(CGFloat)yPos                              { return [_textView lineRecordForPosition:yPos];               }
+- (GVLineRecord)lineFragmentForLine:(NSUInteger)aLine column:(NSUInteger)aColumn { return [_textView lineFragmentForLine:aLine column:aColumn]; }
 
 // =========================
 // = GutterView DataSource =
@@ -793,7 +787,7 @@ private:
 	}
 	else if([columnIdentifier isEqualToString:kFoldingsColumnIdentifier])
 	{
-		switch([textView foldingStateForLine:lineNumber])
+		switch([_textView foldingStateForLine:lineNumber])
 		{
 			case kFoldingTop:       return [self gutterImage:rowState == GutterViewRowStateRegular ? @"Folding Top Template"       : @"Folding Top Hover Template"];
 			case kFoldingCollapsed: return [self gutterImage:rowState == GutterViewRowStateRegular ? @"Folding Collapsed Template" : @"Folding Collapsed Hover Template"];
@@ -877,7 +871,7 @@ private:
 	}
 	else if([columnIdentifier isEqualToString:kFoldingsColumnIdentifier])
 	{
-		[textView toggleFoldingAtLine:lineNumber recursive:OakIsAlternateKeyOrMouseEvent()];
+		[_textView toggleFoldingAtLine:lineNumber recursive:OakIsAlternateKeyOrMouseEvent()];
 		[[NSNotificationCenter defaultCenter] postNotificationName:GVColumnDataSourceDidChange object:self];
 	}
 }
@@ -888,29 +882,29 @@ private:
 
 - (void)goToNextMarkOfType:(NSString*)markType
 {
-	text::selection_t sel(to_s(textView.selectionString));
+	text::selection_t sel(to_s(_textView.selectionString));
 
 	ng::buffer_t const& buf = document->buffer();
 	std::pair<size_t, std::string> const& pair = buf.next_mark(buf.convert(sel.last().max()), to_s(markType));
 	if(pair.second != NULL_STR)
-		textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
+		_textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
 }
 
 - (IBAction)goToPreviousMarkOfType:(NSString*)markType
 {
-	text::selection_t sel(to_s(textView.selectionString));
+	text::selection_t sel(to_s(_textView.selectionString));
 
 	ng::buffer_t const& buf = document->buffer();
 	std::pair<size_t, std::string> const& pair = buf.prev_mark(buf.convert(sel.last().max()), to_s(markType));
 	if(pair.second != NULL_STR)
-		textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
+		_textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
 }
 
 - (IBAction)toggleCurrentBookmark:(id)sender
 {
 	ng::buffer_t& buf = document->buffer();
 
-	text::selection_t sel(to_s(textView.selectionString));
+	text::selection_t sel(to_s(_textView.selectionString));
 	size_t lineNumber = sel.last().max().line;
 
 	std::vector<size_t> toRemove;
@@ -941,8 +935,7 @@ private:
 
 - (void)clearAllBookmarks:(id)sender
 {
-	document->buffer().remove_all_marks(document::kBookmarkIdentifier);
-	[[NSNotificationCenter defaultCenter] postNotificationName:GVColumnDataSourceDidChange object:self];
+	document->remove_all_marks(document::kBookmarkIdentifier);
 }
 
 // ========================
@@ -999,295 +992,13 @@ private:
 	else
 		return [super accessibilityAttributeValue:attribute];
 }
-@end
 
 // ============
 // = Printing =
 // ============
 
-@interface OakPrintDocumentView : NSView
-{
-	document::document_ptr document;
-	NSString* fontName;
-
-	std::shared_ptr<ng::layout_t> layout;
-	std::vector<CGRect> pageRects;
-
-	BOOL _needsLayout;
-}
-@property (nonatomic) CGFloat pageWidth;
-@property (nonatomic) CGFloat pageHeight;
-@property (nonatomic) CGFloat fontScale;
-@property (nonatomic) NSString* themeUUID;
-@property (nonatomic) CGFloat fontSize;
-@end
-
-@implementation OakPrintDocumentView
-- (id)initWithDocument:(document::document_ptr const&)aDocument fontName:(NSString*)aFontName
-{
-	if(self = [self initWithFrame:NSZeroRect])
-	{
-		document = aDocument;
-		fontName = aFontName;
-	}
-	return self;
-}
-
-- (BOOL)isFlipped
-{
-	return YES;
-}
-
-- (NSString*)printJobTitle
-{
-	return [NSString stringWithCxxString:document->display_name()];
-}
-
-- (BOOL)knowsPageRange:(NSRangePointer)range
-{
-	NSPrintInfo* info = [[NSPrintOperation currentOperation] printInfo];
-
-	NSRect display = NSIntersectionRect(info.imageablePageBounds, (NSRect){ NSZeroPoint, info.paperSize });
-	info.leftMargin   = NSMinX(display);
-	info.rightMargin  = info.paperSize.width - NSMaxX(display);
-	info.topMargin    = info.paperSize.height - NSMaxY(display);
-	info.bottomMargin = NSMinY(display);
-
-	self.pageWidth  = floor(info.paperSize.width - info.leftMargin - info.rightMargin);
-	self.pageHeight = floor(info.paperSize.height - info.topMargin - info.bottomMargin);
-	self.fontScale  = [[[info dictionary] objectForKey:NSPrintScalingFactor] floatValue];
-	self.fontSize   = [[[info dictionary] objectForKey:@"OakPrintFontSize"] floatValue];
-	self.themeUUID  = [[info dictionary] objectForKey:@"OakPrintThemeUUID"];
-
-	[self updateLayout];
-	[self setFrame:NSMakeRect(0, 0, self.pageWidth, layout->height())];
-
-	range->location = 1;
-	range->length   = pageRects.size();
-
-	return YES;
-}
-
-- (NSRect)rectForPage:(NSInteger)pageNumber
-{
-	NSParameterAssert(0 < pageNumber && pageNumber <= pageRects.size());
-	return pageRects[pageNumber-1];
-}
-
-- (void)drawRect:(NSRect)aRect
-{
-	NSEraseRect(aRect);
-	if(![NSGraphicsContext currentContextDrawingToScreen] && layout)
-		layout->draw((CGContextRef)[[NSGraphicsContext currentContext] graphicsPort], aRect, [self isFlipped], /* selection: */ ng::ranges_t(), /* highlight: */ ng::ranges_t(), /* draw background: */ false);
-}
-
-- (void)updateLayout
-{
-	if(!_needsLayout)
-		return;
-
-	pageRects.clear();
-
-	theme_ptr theme = parse_theme(bundles::lookup(to_s(self.themeUUID)));
-	theme = theme->copy_with_font_name_and_size(to_s(fontName), _fontSize * self.fontScale);
-	layout = std::make_shared<ng::layout_t>(document->buffer(), theme, /* softWrap: */ true);
-	layout->set_viewport_size(CGSizeMake(self.pageWidth, self.pageHeight));
-	layout->update_metrics(CGRectMake(0, 0, CGFLOAT_MAX, CGFLOAT_MAX));
-
-	CGRect pageRect = CGRectMake(0, 0, self.pageWidth, self.pageHeight);
-	while(true)
-	{
-		CGRect lineRect = layout->rect_at_index(layout->index_at_point(CGPointMake(NSMinX(pageRect), NSMaxY(pageRect))).index);
-		if(NSMaxY(lineRect) <= NSMinY(pageRect))
-			break;
-		else if(CGRectContainsRect(pageRect, lineRect))
-			pageRect.size.height = NSMaxY(lineRect) - NSMinY(pageRect);
-		else
-			pageRect.size.height = NSMinY(lineRect) - NSMinY(pageRect);
-		pageRects.push_back(pageRect);
-
-		pageRect.origin.y = NSMaxY(pageRect);
-		pageRect.size.height = self.pageHeight;
-	}
-
-	_needsLayout = NO;
-}
-
-- (void)setPageWidth:(CGFloat)newPageWidth    { if(_pageWidth  != newPageWidth)  { _needsLayout = YES; _pageWidth  = newPageWidth;  } }
-- (void)setPageHeight:(CGFloat)newPageHeight  { if(_pageHeight != newPageHeight) { _needsLayout = YES; _pageHeight = newPageHeight; } }
-- (void)setFontScale:(CGFloat)newFontScale    { if(_fontScale  != newFontScale)  { _needsLayout = YES; _fontScale  = newFontScale;  } }
-- (void)setFontSize:(CGFloat)newFontSize      { if(_fontSize   != newFontSize)   { _needsLayout = YES; _fontSize   = newFontSize;   } }
-- (void)setThemeUUID:(NSString*)newThemeUUID  { if(![_themeUUID isEqualToString:newThemeUUID]) { _needsLayout = YES; _themeUUID  = newThemeUUID; } }
-@end
-
-@interface OakTextViewPrintOptionsViewController : NSViewController <NSPrintPanelAccessorizing>
-{
-	std::vector<oak::uuid_t> themeUUIDs;
-}
-@end
-
-#ifndef CONSTRAINT
-#define CONSTRAINT(str, align) [constraints addObjectsFromArray:[NSLayoutConstraint constraintsWithVisualFormat:str options:align metrics:nil views:views]]
-#endif
-
-@implementation OakTextViewPrintOptionsViewController
-- (id)init
-{
-	if((self = [super init]))
-	{
-		NSView* contentView = [[NSView alloc] initWithFrame:NSZeroRect];
-		[contentView setTranslatesAutoresizingMaskIntoConstraints:NO];
-
-		NSTextField* themesLabel    = OakCreateLabel(@"Theme:");
-		NSPopUpButton* themes       = OakCreatePopUpButton();
-		NSTextField* fontSizesLabel = OakCreateLabel(@"Font Size:");
-		NSPopUpButton* fontSizes    = OakCreatePopUpButton();
-		NSButton* printHeaders      = OakCreateCheckBox(@"Print header and footer");
-
-		NSMenu* themesMenu = themes.menu;
-		[themesMenu removeAllItems];
-
-		std::multimap<std::string, bundles::item_ptr, text::less_t> ordered;
-		for(auto item : bundles::query(bundles::kFieldAny, NULL_STR, scope::wildcard, bundles::kItemTypeTheme))
-			ordered.emplace(item->name(), item);
-
-		for(auto pair : ordered)
-		{
-			[themesMenu addItemWithTitle:[NSString stringWithCxxString:pair.first] action:NULL keyEquivalent:@""];
-			themeUUIDs.push_back(pair.second->uuid());
-		}
-
-		if(ordered.empty())
-			[themesMenu addItemWithTitle:@"No Themes Loaded" action:@selector(nop:) keyEquivalent:@""];
-
-		NSMenu* fontSizesMenu = fontSizes.menu;
-		[fontSizesMenu removeAllItems];
-		for(NSInteger size = 4; size < 23; ++size)
-			[fontSizesMenu addItemWithTitle:@(size).stringValue action:NULL keyEquivalent:@""];
-
-		[themes bind:NSSelectedIndexBinding toObject:self withKeyPath:@"themeIndex" options:nil];
-		[fontSizes bind:NSSelectedValueBinding toObject:self withKeyPath:@"printFontSize" options:nil];
-		[printHeaders bind:NSValueBinding toObject:self withKeyPath:@"printHeaderAndFooter" options:nil];
-
-		NSDictionary* views = @{
-			@"themesLabel"    : themesLabel,
-			@"themes"         : themes,
-			@"fontSizesLabel" : fontSizesLabel,
-			@"fontSizes"      : fontSizes,
-			@"printHeaders"   : printHeaders
-		};
-
-		OakAddAutoLayoutViewsToSuperview([views allValues], contentView);
-
-		NSMutableArray* constraints = [NSMutableArray array];
-		CONSTRAINT(@"H:|-(>=4)-[themesLabel]-[themes]-(>=4)-|",        NSLayoutFormatAlignAllBaseline);
-		CONSTRAINT(@"H:|-(>=4)-[fontSizesLabel]-[fontSizes]-(>=4)-|",  NSLayoutFormatAlignAllBaseline);
-		CONSTRAINT(@"H:[printHeaders]-(>=4)-|",                        0);
-		CONSTRAINT(@"V:|-[themes]-[fontSizes]",                        NSLayoutFormatAlignAllLeft|NSLayoutFormatAlignAllRight);
-		CONSTRAINT(@"V:[fontSizes]-[printHeaders]-|",                  NSLayoutFormatAlignAllLeft);
-		[contentView addConstraints:constraints];
-
-		contentView.frame = (NSRect){ NSZeroPoint, [contentView fittingSize] };
-		self.view = contentView;
-	}
-	return self;
-}
-
-- (void)setRepresentedObject:(NSPrintInfo*)printInfo
-{
-	[super setRepresentedObject:printInfo];
-	[self setThemeIndex:[self themeIndex]];
-	[self setPrintFontSize:[self printFontSize]];
-	[self setPrintHeaderAndFooter:[self printHeaderAndFooter]];
-}
-
-- (void)setThemeIndex:(NSInteger)anIndex
-{
-	if(anIndex < themeUUIDs.size())
-	{
-		NSPrintInfo* info = [self representedObject];
-		[[info dictionary] setObject:[NSString stringWithCxxString:themeUUIDs[anIndex]] forKey:@"OakPrintThemeUUID"];
-		[[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithCxxString:themeUUIDs[anIndex]] forKey:@"OakPrintThemeUUID"];
-	}
-}
-
-- (NSInteger)themeIndex
-{
-	NSPrintInfo* info = [self representedObject];
-	if(NSString* themeUUID = [[info dictionary] objectForKey:@"OakPrintThemeUUID"])
-	{
-		for(size_t i = 0; i < themeUUIDs.size(); ++i)
-		{
-			if(themeUUIDs[i] == to_s(themeUUID))
-				return i;
-		}
-	}
-	return 0;
-}
-
-- (void)setPrintHeaderAndFooter:(BOOL)flag
-{
-	NSPrintInfo* info = [self representedObject];
-	[[info dictionary] setObject:@(flag) forKey:NSPrintHeaderAndFooter];
-	[[NSUserDefaults standardUserDefaults] setObject:@(flag) forKey:@"OakPrintHeaderAndFooter"];
-}
-
-- (BOOL)printHeaderAndFooter
-{
-	return [[[[self representedObject] dictionary] objectForKey:NSPrintHeaderAndFooter] boolValue];
-}
-
-- (void)setPrintFontSize:(NSNumber*)size
-{
-	NSPrintInfo* info = [self representedObject];
-	[[info dictionary] setObject:size forKey:@"OakPrintFontSize"];
-	[[NSUserDefaults standardUserDefaults] setObject:size forKey:@"OakPrintFontSize"];
-}
-
-- (NSNumber*)printFontSize
-{
-	return [[[self representedObject] dictionary] objectForKey:@"OakPrintFontSize"];
-}
-
-- (NSSet*)keyPathsForValuesAffectingPreview
-{
-	return [NSSet setWithObjects:@"themeIndex", @"printFontSize", @"printHeaderAndFooter", nil];
-}
-
-- (NSArray*)localizedSummaryItems
-{
-	return @[ ]; // TODO
-}
-
-- (NSString*)title
-{
-	return @"TextMate";
-}
-@end
-
-@implementation OakDocumentView (Printing)
-+ (void)initialize
-{
-	[[NSUserDefaults standardUserDefaults] registerDefaults:@{
-		@"OakPrintThemeUUID"       : @"71D40D9D-AE48-11D9-920A-000D93589AF6",
-		@"OakPrintFontSize"        : @(11),
-		@"OakPrintHeaderAndFooter" : @NO,
-	}];
-}
-
 - (void)printDocument:(id)sender
 {
-	NSPrintOperation* printer = [NSPrintOperation printOperationWithView:[[OakPrintDocumentView alloc] initWithDocument:document fontName:textView.font.fontName]];
-
-	NSMutableDictionary* info = [[printer printInfo] dictionary];
-	info[@"OakPrintThemeUUID"]   = [[NSUserDefaults standardUserDefaults] objectForKey:@"OakPrintThemeUUID"];
-	info[@"OakPrintFontSize"]    = [[NSUserDefaults standardUserDefaults] objectForKey:@"OakPrintFontSize"];
-	info[NSPrintHeaderAndFooter] = [[NSUserDefaults standardUserDefaults] objectForKey:@"OakPrintHeaderAndFooter"];
-
-	[[printer printInfo] setVerticallyCentered:NO];
-	[[printer printPanel] setOptions:[[printer printPanel] options] | NSPrintPanelShowsPaperSize | NSPrintPanelShowsOrientation | NSPrintPanelShowsScaling];
-	[[printer printPanel] addAccessoryController:[OakTextViewPrintOptionsViewController new]];
-
-	[printer runOperationModalForWindow:[self window] delegate:nil didRunSelector:NULL contextInfo:nil];
+	[document->document() runPrintOperationModalForWindow:self.window fontName:_textView.font.fontName];
 }
 @end

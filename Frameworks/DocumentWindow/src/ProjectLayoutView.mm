@@ -1,6 +1,5 @@
 #import "ProjectLayoutView.h"
 #import <OakAppKit/OakUIConstructionFunctions.h>
-#import <OakAppKit/NSColor Additions.h>
 #import <Preferences/Keys.h>
 #import <oak/misc.h>
 #import <oak/debug.h>
@@ -47,7 +46,7 @@ NSString* const kUserDefaultsHTMLOutputSizeKey   = @"htmlOutputSize";
 
 - (void)userDefaultsDidChange:(NSNotification*)aNotification
 {
-	self.htmlOutputOnRight  = [[[NSUserDefaults standardUserDefaults] objectForKey:kUserDefaultsHTMLOutputPlacementKey] isEqualToString:@"right"];
+	self.htmlOutputOnRight  = [[[NSUserDefaults standardUserDefaults] stringForKey:kUserDefaultsHTMLOutputPlacementKey] isEqualToString:@"right"];
 	self.tabsAboveDocument  = [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsTabsAboveDocumentKey];
 }
 

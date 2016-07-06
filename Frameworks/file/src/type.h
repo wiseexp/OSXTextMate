@@ -6,6 +6,8 @@
 
 namespace file
 {
+	PUBLIC std::string type_from_bytes (io::bytes_ptr const& bytes);
+	PUBLIC std::string type_from_path (std::string const& path);
 	PUBLIC std::string type (std::string const& path, io::bytes_ptr const& bytes, std::string const& virtualPath = NULL_STR);
 	PUBLIC void set_type (std::string const& path, std::string const& fileType);
 

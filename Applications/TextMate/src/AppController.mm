@@ -25,6 +25,7 @@
 #import <network/tbz.h>
 #import <ns/ns.h>
 #import <license/license.h>
+#import <settings/settings.h>
 #import <oak/debug.h>
 #import <oak/compat.h>
 #import <oak/oak.h>
@@ -317,7 +318,6 @@ BOOL HasDocumentWindow (NSArray* windows)
 
 	[TerminalPreferences updateMateIfRequired];
 	[AboutWindowController showChangesIfUpdated];
-	[[BundlesManager sharedInstance] setAutoUpdateBundles:YES];
 
 	[[CrashReporter sharedInstance] applicationDidFinishLaunching:aNotification];
 	[[CrashReporter sharedInstance] postNewCrashReportsToURLString:[NSString stringWithFormat:@"%s/crashes", REST_API]];

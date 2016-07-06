@@ -91,7 +91,7 @@ namespace ng
 			res = r.post_selection;
 			rev = r.post_revision;
 
-			if(_index < _records.size()-1 && res == _records[_index].pre_selection && should_merge(r, _records[_index]))
+			if(res == _records[_index].pre_selection && should_merge(r, _records[_index]))
 				res = ranges_t();
 		}
 		_buffer.set_revision(rev);
@@ -100,10 +100,10 @@ namespace ng
 		return res;
 	}
 
-	void undo_manager_t::will_replace (size_t from, size_t to, std::string const& str)
+	void undo_manager_t::will_replace (size_t from, size_t to, char const* buf, size_t len)
 	{
 		_records.erase(_records.begin() + _index, _records.end());
-		_records.emplace_back(from, _buffer.substr(from, to), str, _pre_selection, _pre_revision);
+		_records.emplace_back(from, _buffer.substr(from, to), std::string(buf, len), _pre_selection, _pre_revision);
 		_pre_selection = ranges_t();
 		++_changes;
 		++_index;

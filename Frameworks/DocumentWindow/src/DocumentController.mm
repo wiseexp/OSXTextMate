@@ -1,9 +1,10 @@
 #import "DocumentController.h"
 #import "ProjectLayoutView.h"
-#import "DocumentOpenHelper.h"
 #import "DocumentSaveHelper.h"
 #import "DocumentCommand.h" // show_command_error
+#import "SelectGrammarViewController.h"
 #import "OakRunCommandWindowController.h"
+#import <document/OakDocument.h>
 #import <OakAppKit/NSAlert Additions.h>
 #import <OakAppKit/NSMenuItem Additions.h>
 #import <OakAppKit/OakAppKit.h>
@@ -21,6 +22,8 @@
 #import <OakSystem/application.h>
 #import <OakSystem/process.h>
 #import <Find/Find.h>
+#import <BundlesManager/BundlesManager.h>
+#import <network/network.h>
 #import <crash/info.h>
 #import <file/path_info.h>
 #import <io/entries.h>
@@ -28,12 +31,15 @@
 #import <text/parse.h>
 #import <text/tokenize.h>
 #import <text/utf8.h>
+#import <settings/settings.h>
 #import <ns/ns.h>
 #import <kvdb/kvdb.h>
 
 static NSString* const kUserDefaultsAlwaysFindInDocument = @"alwaysFindInDocument";
 static NSString* const kUserDefaultsDisableFolderStateRestore = @"disableFolderStateRestore";
 static NSString* const kUserDefaultsHideStatusBarKey = @"hideStatusBar";
+static NSString* const kUserDefaultsDisableBundleSuggestionsKey = @"disableBundleSuggestions";
+static NSString* const kUserDefaultsGrammarsToNeverSuggestKey = @"grammarsToNeverSuggest";
 static BOOL IsInShouldTerminateEventLoop = NO;
 
 @interface QuickLookNSURLWrapper : NSObject <QLPreviewItem>
@@ -79,6 +85,7 @@ static BOOL IsInShouldTerminateEventLoop = NO;
 @property (nonatomic) scm::status::type           documentSCMStatus;
 
 @property (nonatomic) NSArray*                    urlArrayForQuickLook;
+@property (nonatomic) NSArray<Bundle*>*           bundlesAlreadySuggested;
 
 + (void)scheduleSessionBackup:(id)sender;
 
@@ -200,43 +207,6 @@ namespace
 		return doc && !doc->is_modified() && !doc->is_on_disk() && doc->path() == NULL_STR && doc->buffer().empty();
 	}
 
-	static size_t merge_documents_splitting_at (std::vector<document::document_ptr> const& oldDocuments, std::vector<document::document_ptr> const& newDocuments, size_t splitAt, std::vector<document::document_ptr>& out, bool disableTabReordering = false)
-	{
-		if(newDocuments.empty())
-		{
-			std::copy(oldDocuments.begin(), oldDocuments.end(), back_inserter(out));
-			return std::min(splitAt, out.size());
-		}
-
-		splitAt = std::min(splitAt, oldDocuments.size());
-		if(disableTabReordering)
-		{
-			auto iter = std::find(oldDocuments.begin(), oldDocuments.end(), newDocuments.front());
-			if(iter != oldDocuments.end())
-				splitAt = iter - oldDocuments.begin();
-		}
-
-		std::set<oak::uuid_t> uuids;
-		std::transform(newDocuments.begin(), newDocuments.end(), inserter(uuids, uuids.end()), [](document::document_ptr const& doc){ return doc->identifier(); });
-
-		std::copy_if(oldDocuments.begin(), oldDocuments.begin() + splitAt, back_inserter(out), [&uuids](document::document_ptr const& doc){ return uuids.find(doc->identifier()) == uuids.end(); });
-		uuids.clear();
-		for(auto const& doc : newDocuments)
-		{
-			if(uuids.insert(doc->identifier()).second)
-				out.push_back(doc);
-		}
-		std::copy_if(oldDocuments.begin() + splitAt, oldDocuments.end(), back_inserter(out), [&uuids](document::document_ptr const& doc){ return uuids.find(doc->identifier()) == uuids.end(); });
-
-		auto iter = std::find(out.begin(), out.end(), newDocuments.front());
-		return iter - out.begin();
-	}
-
-	static std::vector<document::document_ptr> make_vector (document::document_ptr const& document)
-	{
-		return std::vector<document::document_ptr>(1, document);
-	}
-
 	static document::document_ptr create_untitled_document_in_folder (std::string const& suggestedFolder)
 	{
 		auto doc = document::from_content("", settings_for_path(NULL_STR, file::path_attributes(NULL_STR), suggestedFolder).get(kSettingsFileTypeKey, "text.plain"));
@@ -250,9 +220,7 @@ namespace
 {
 	OBJC_WATCH_LEAKS(DocumentController);
 
-	std::vector<document::document_ptr>    _documents;
 	std::map<oak::uuid_t, tracking_info_t> _trackedDocuments;
-	document::document_ptr                 _selectedDocument;
 	command::runner_ptr                    _runner;
 
 	scm::info_ptr                          _projectSCMInfo;
@@ -399,7 +367,7 @@ namespace
 	if((([self.window styleMask] & NSFullScreenWindowMask) != NSFullScreenWindowMask) && !self.window.isZoomed)
 		[[NSUserDefaults standardUserDefaults] setObject:NSStringFromRect([self windowFrame]) forKey:@"DocumentControllerWindowFrame"];
 
-	self.documents          = std::vector<document::document_ptr>();
+	self.documents          = { };
 	self.selectedDocument   = document::document_ptr();
 	self.fileBrowserVisible = NO; // Make window frame small as we no longer respond to savableWindowFrame
 	self.identifier         = nil; // This removes us from AllControllers and causes a release
@@ -410,7 +378,7 @@ namespace
 	if(_documents.empty())
 	{
 		document::document_ptr defaultDocument = create_untitled_document_in_folder(to_s(self.untitledSavePath));
-		self.documents = make_vector(defaultDocument);
+		self.documents = { defaultDocument };
 		[self openAndSelectDocument:defaultDocument];
 	}
 	[self.window makeKeyAndOrderFront:sender];
@@ -449,12 +417,12 @@ namespace
 
 - (void)userDefaultsDidChange:(NSNotification*)aNotification
 {
-	self.htmlOutputInWindow = [[[NSUserDefaults standardUserDefaults] objectForKey:kUserDefaultsHTMLOutputPlacementKey] isEqualToString:@"window"];
+	self.htmlOutputInWindow = [[[NSUserDefaults standardUserDefaults] stringForKey:kUserDefaultsHTMLOutputPlacementKey] isEqualToString:@"window"];
 	self.disableFileBrowserWindowResize = [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableFileBrowserWindowResizeKey];
 	self.autoRevealFile = [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsAutoRevealFileKey];
 	self.documentView.hideStatusBar = [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsHideStatusBarKey];
 
-	if(self.layoutView.fileBrowserOnRight != [[[NSUserDefaults standardUserDefaults] objectForKey:kUserDefaultsFileBrowserPlacementKey] isEqualToString:@"right"])
+	if(self.layoutView.fileBrowserOnRight != [[[NSUserDefaults standardUserDefaults] stringForKey:kUserDefaultsFileBrowserPlacementKey] isEqualToString:@"right"])
 	{
 		self.oldWindowFrame = self.newWindowFrame = NSZeroRect;
 		self.layoutView.fileBrowserOnRight = !self.layoutView.fileBrowserOnRight;
@@ -815,7 +783,8 @@ namespace
 	std::vector<document::document_ptr> documents;
 	for(DocumentController* delegate in SortedControllers())
 	{
-		std::copy_if(delegate.documents.begin(), delegate.documents.end(), back_inserter(documents), [&restoresSession](document::document_ptr const& doc){ return doc->is_modified() && (doc->path() != NULL_STR || !restoresSession); });
+		auto delegateDocuments = delegate.documents; // Returns by-value so each result is unique
+		std::copy_if(delegateDocuments.begin(), delegateDocuments.end(), back_inserter(documents), [&restoresSession](document::document_ptr const& doc){ return doc->is_modified() && (doc->path() != NULL_STR || !restoresSession); });
 		if(!documents.empty() && !controller)
 			controller = delegate;
 	}
@@ -900,18 +869,12 @@ namespace
 			auto const settings = settings_for_path(doc->virtual_path(), doc->file_type(), path::parent(doc->path()));
 			doc->set_indent(text::indent_t(std::max(1, settings.get(kSettingsTabSizeKey, 4)), SIZE_T_MAX, settings.get(kSettingsSoftTabsKey, false)));
 
+			[self insertDocuments:{ doc } atIndex:_selectedTabIndex + 1 selecting:doc andClosing:[self disposableDocument]];
+
+			// Using openAndSelectDocument: will move focus to OakTextView
 			doc->sync_open();
 			[self setSelectedDocument:doc];
 			doc->close();
-
-			size_t selectedIndex = _selectedTabIndex;
-			std::vector<document::document_ptr> documents = _documents;
-			if(is_disposable(documents[selectedIndex]))
-					documents[selectedIndex] = doc;
-			else	documents.insert(documents.begin() + ++selectedIndex, doc);
-
-			self.documents        = documents;
-			self.selectedTabIndex = selectedIndex;
 
 			[self.fileBrowser editURL:url];
 		}
@@ -930,7 +893,10 @@ namespace
 	for(DocumentController* delegate in SortedControllers())
 	{
 		if(delegate != self && ![delegate.window isMiniaturized])
-			documents.insert(documents.end(), delegate.documents.begin(), delegate.documents.end());
+		{
+			auto delegateDocuments = delegate.documents; // Returns by-value so each result is unique
+			documents.insert(documents.end(), delegateDocuments.begin(), delegateDocuments.end());
+		}
 	}
 
 	self.documents = documents;
@@ -942,9 +908,45 @@ namespace
 	}
 }
 
-- (BOOL)disableTabReordering
+- (std::set<oak::uuid_t>)disposableDocument
 {
-	return [[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTabReorderingKey];
+	if(_selectedTabIndex < _documents.size() && is_disposable(_documents[_selectedTabIndex]))
+		return { _documents[_selectedTabIndex]->identifier() };
+	return { };
+}
+
+- (void)insertDocuments:(std::vector<document::document_ptr> const&)documents atIndex:(NSInteger)index selecting:(document::document_ptr const&)selectDocument andClosing:(std::set<oak::uuid_t> const&)closeDocuments
+{
+	std::set<oak::uuid_t> oldUUIDs, newUUIDs;
+	std::transform(_documents.begin(), _documents.end(), inserter(oldUUIDs, oldUUIDs.end()), [](auto const& doc){ return doc->identifier(); });
+	std::transform(documents.begin(), documents.end(), inserter(newUUIDs, newUUIDs.end()), [](auto const& doc){ return doc->identifier(); });
+	std::for_each(closeDocuments.begin(), closeDocuments.end(), [&oldUUIDs](auto const& uuid){ oldUUIDs.erase(uuid); });
+
+	BOOL shouldReorder = ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTabReorderingKey];
+	std::vector<document::document_ptr> newDocuments;
+	for(NSUInteger i = 0; i <= _documents.size(); ++i)
+	{
+		if(i == MIN(index, _documents.size()))
+		{
+			for(NSUInteger j = 0; j < documents.size(); ++j)
+			{
+				if(shouldReorder || oldUUIDs.find(documents[j]->identifier()) == oldUUIDs.end())
+					newDocuments.push_back(documents[j]);
+			}
+		}
+
+		if(i == _documents.size())
+			break;
+		else if(shouldReorder && newUUIDs.find(_documents[i]->identifier()) != newUUIDs.end())
+			continue;
+		else if(closeDocuments.find(_documents[i]->identifier()) != closeDocuments.end())
+			continue;
+
+		newDocuments.push_back(_documents[i]);
+	}
+
+	self.documents        = newDocuments;
+	self.selectedTabIndex = std::find_if(newDocuments.begin(), newDocuments.end(), [&selectDocument](auto const& doc){ return *doc == *selectDocument; }) - newDocuments.begin();
 }
 
 - (void)openItems:(NSArray*)items closingOtherTabs:(BOOL)closeOtherTabsFlag
@@ -974,61 +976,41 @@ namespace
 	if(documents.empty())
 		return;
 
-	std::vector<document::document_ptr> oldDocuments = _documents;
-	NSUInteger split = _selectedTabIndex;
-
-	std::set<oak::uuid_t> oldUUIDs, newUUIDs, actualNewUUIDs;
-	std::transform(oldDocuments.begin(), oldDocuments.end(), inserter(oldUUIDs, oldUUIDs.end()), [](document::document_ptr const& doc){ return doc->identifier(); });
-	std::transform(documents.begin(), documents.end(), inserter(newUUIDs, newUUIDs.end()), [](document::document_ptr const& doc){ return doc->identifier(); });
-	std::set_difference(newUUIDs.begin(), newUUIDs.end(), oldUUIDs.begin(), oldUUIDs.end(), inserter(actualNewUUIDs, actualNewUUIDs.end()));
-
-	if(!actualNewUUIDs.empty() && !oldDocuments.empty() && is_disposable(oldDocuments[split]))
-			oldDocuments.erase(oldDocuments.begin() + split);
-	else	++split;
-
-	std::vector<document::document_ptr> newDocuments;
-	split = merge_documents_splitting_at(oldDocuments, documents, split, newDocuments, [self disableTabReordering]);
-
-	self.documents        = newDocuments;
-	self.selectedTabIndex = split;
-
-	if(!newDocuments.empty())
-		[self openAndSelectDocument:newDocuments[split]];
-
+	std::set<oak::uuid_t> tabsToClose;
 	if(closeOtherTabsFlag)
 	{
-		std::set<oak::uuid_t> uuids;
-		std::transform(documents.begin(), documents.end(), inserter(uuids, uuids.end()), [](document::document_ptr const& doc){ return doc->identifier(); });
-
-		NSMutableIndexSet* indexSet = [NSMutableIndexSet indexSet];
-		for(size_t i = 0; i < newDocuments.size(); ++i)
+		for(auto const& doc : _documents)
 		{
-			document::document_ptr doc = newDocuments[i];
-			if(!doc->is_modified() && uuids.find(doc->identifier()) == uuids.end() && !_documents[i]->sticky())
-				[indexSet addIndex:i];
+			if(!doc->is_modified() && !doc->sticky())
+				tabsToClose.insert(doc->identifier());
 		}
-		[self closeTabsAtIndexes:indexSet askToSaveChanges:YES createDocumentIfEmpty:NO];
 	}
-	else if(![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTabAutoCloseKey])
+	else
+	{
+		tabsToClose = [self disposableDocument];
+	}
+
+	[self insertDocuments:documents atIndex:_selectedTabIndex + 1 selecting:documents.back() andClosing:tabsToClose];
+	[self openAndSelectDocument:documents.back()];
+
+	if(self.tabBarView && ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableTabAutoCloseKey])
 	{
 		NSInteger excessTabs = _documents.size() - std::max<NSUInteger>(self.tabBarView.countOfVisibleTabs, 8);
-		if(self.tabBarView && excessTabs > 0)
+		if(excessTabs > 0)
 		{
-			std::set<oak::uuid_t> uuids;
-			std::transform(documents.begin(), documents.end(), inserter(uuids, uuids.end()), [](document::document_ptr const& doc){ return doc->identifier(); });
-
 			std::multimap<oak::date_t, size_t> ranked;
-			for(size_t i = 0; i < newDocuments.size(); ++i)
-			{
-				document::document_ptr doc = newDocuments[i];
-				if(!doc->is_modified() && doc->is_on_disk() && uuids.find(doc->identifier()) == uuids.end() && !doc->sticky())
-					ranked.emplace(doc->lru(), i);
-			}
+			for(size_t i = 0; i < _documents.size(); ++i)
+				ranked.emplace(_documents[i]->lru(), i);
+
+			std::set<oak::uuid_t> newUUIDs;
+			std::transform(documents.begin(), documents.end(), inserter(newUUIDs, newUUIDs.end()), [](auto const& doc){ return doc->identifier(); });
 
 			NSMutableIndexSet* indexSet = [NSMutableIndexSet indexSet];
 			for(auto const& pair : ranked)
 			{
-				[indexSet addIndex:pair.second];
+				document::document_ptr doc = _documents[pair.second];
+				if(!doc->is_modified() && !doc->sticky() && doc->is_on_disk() && newUUIDs.find(doc->identifier()) == newUUIDs.end())
+					[indexSet addIndex:pair.second];
 				if([indexSet count] == excessTabs)
 					break;
 			}
@@ -1051,17 +1033,65 @@ namespace
 - (void)openAndSelectDocument:(document::document_ptr const&)aDocument
 {
 	document::document_ptr doc = aDocument;
-	[[DocumentOpenHelper new] tryOpenDocument:doc forWindow:self.window completionHandler:^(std::string const& error, oak::uuid_t const& filterUUID){
-		if(error == NULL_STR)
+	[doc->document() loadModalForWindow:self.window completionHandler:^(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID){
+		if(success)
 		{
+			OakDocument* document = doc->document();
+			BOOL showBundleSuggestions = ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableBundleSuggestionsKey];
+			if(!document.fileType && showBundleSuggestions && network::can_reach_host([[[NSURL URLWithString:@(REST_API)] host] UTF8String]))
+			{
+				NSArray<BundleGrammar*>* grammars = document.proposedGrammars;
+				if(NSArray* excludedGrammars = [[NSUserDefaults standardUserDefaults] arrayForKey:kUserDefaultsGrammarsToNeverSuggestKey])
+					grammars = [grammars filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"!(identifier.UUIDString IN %@)", excludedGrammars]];
+				if(_bundlesAlreadySuggested)
+					grammars = [grammars filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"!(bundle IN %@)", _bundlesAlreadySuggested]];
+
+				if([grammars count])
+				{
+					self.bundlesAlreadySuggested = [(_bundlesAlreadySuggested ?: @[ ]) arrayByAddingObject:[grammars firstObject].bundle];
+
+					SelectGrammarViewController* installer = [[SelectGrammarViewController alloc] init];
+					installer.documentDisplayName = document.path || document.customName ? document.displayName : nil;
+
+					__weak __block id documentCloseObserver = [[NSNotificationCenter defaultCenter] addObserverForName:OakDocumentWillCloseNotification object:document queue:nil usingBlock:^(NSNotification*){
+						[installer dismiss];
+						[[NSNotificationCenter defaultCenter] removeObserver:documentCloseObserver];
+					}];
+
+					[installer showGrammars:grammars forView:_documentView completionHandler:^(SelectGrammarResponse response, BundleGrammar* grammar){
+						if(response == SelectGrammarResponseInstall && grammar.bundle.isInstalled)
+						{
+							for(document::document_ptr cppDoc : _documents)
+							{
+								OakDocument* doc = cppDoc->document();
+								if([doc isEqual:document] || [[doc proposedGrammars] containsObject:grammar])
+									doc.fileType = grammar.fileType;
+							}
+						}
+						else if(response == SelectGrammarResponseNever)
+						{
+							NSArray* excludedGrammars = [[NSUserDefaults standardUserDefaults] arrayForKey:kUserDefaultsGrammarsToNeverSuggestKey] ?: @[ ];
+							[[NSUserDefaults standardUserDefaults] setObject:[excludedGrammars arrayByAddingObject:grammar.identifier.UUIDString] forKey:kUserDefaultsGrammarsToNeverSuggestKey];
+						}
+
+						if(id observer = documentCloseObserver)
+							[[NSNotificationCenter defaultCenter] removeObserver:observer];
+					}];
+				}
+
+				std::string const docAttributes = document.path ? "attr.file.unknown-type" : "attr.untitled";
+				document.fileType = to_ns(settings_for_path(to_s(document.virtualPath ?: document.path), docAttributes, to_s(self.projectPath)).get(kSettingsFileTypeKey, "text.plain"));
+			}
+
 			[self makeTextViewFirstResponder:self];
 			[self setSelectedDocument:doc];
 			[self performSelector:@selector(didOpenDocuemntInTextView:) withObject:self.documentView.textView afterDelay:0];
+			[doc->document() close];
 		}
 		else
 		{
 			if(filterUUID)
-				show_command_error(error, filterUUID);
+				show_command_error(to_s(errorMessage), filterUUID);
 
 			// Close the tab that failed to open
 			for(size_t i = 0; i < _documents.size(); ++i)
@@ -1109,15 +1139,14 @@ namespace
 			{
 				 // FIXME check if paths[0] already exists (overwrite)
 
-				std::vector<document::document_ptr> documents, newDocuments;
+				std::vector<document::document_ptr> documents = { _selectedDocument };
 				std::transform(paths.begin() + 1, paths.end(), back_inserter(documents), [&encoding](std::string const& path) -> document::document_ptr {
 					document::document_ptr doc = document::create(path);
 					doc->set_disk_encoding(encoding);
 					return doc;
 				});
 
-				merge_documents_splitting_at(_documents, documents, _selectedTabIndex + 1, newDocuments);
-				self.documents = newDocuments;
+				[self insertDocuments:documents atIndex:_selectedTabIndex selecting:documents.front() andClosing:{ }];
 			}
 
 			[DocumentSaveHelper trySaveDocument:_selectedDocument forWindow:self.window defaultDirectory:nil completionHandler:nil];
@@ -1533,7 +1562,7 @@ namespace
 // = Properties =
 // ==============
 
-- (void)setDocuments:(std::vector<document::document_ptr> const&)newDocuments
+- (void)setDocuments:(std::vector<document::document_ptr>)newDocuments
 {
 	for(auto document : newDocuments)
 		[self trackDocument:document];
@@ -1549,7 +1578,7 @@ namespace
 	[[self class] scheduleSessionBackup:self];
 }
 
-- (void)setSelectedDocument:(document::document_ptr const&)newSelectedDocument
+- (void)setSelectedDocument:(document::document_ptr)newSelectedDocument
 {
 	ASSERT(!newSelectedDocument || newSelectedDocument->is_open());
 	if(_selectedDocument == newSelectedDocument)
@@ -1645,14 +1674,8 @@ namespace
 	if(NSIndexSet* indexSet = [self tryObtainIndexSetFrom:sender])
 	{
 		document::document_ptr doc = create_untitled_document_in_folder(to_s(self.untitledSavePath));
-		doc->sync_open();
-		[self setSelectedDocument:doc];
-		doc->close();
-
-		std::vector<document::document_ptr> newDocuments;
-		size_t pos = merge_documents_splitting_at(_documents, make_vector(doc), [indexSet firstIndex], newDocuments);
-		self.documents        = newDocuments;
-		self.selectedTabIndex = pos;
+		[self insertDocuments:{ doc } atIndex:[indexSet firstIndex] selecting:doc andClosing:{ }];
+		[self openAndSelectDocument:doc];
 	}
 }
 
@@ -1673,7 +1696,7 @@ namespace
 		if(documents.size() == 1)
 		{
 			DocumentController* controller = [DocumentController new];
-			controller.documents = make_vector(documents[0]);
+			controller.documents = { documents[0] };
 			if(path::is_child(documents[0]->path(), to_s(self.projectPath)))
 				controller.defaultProjectPath = self.projectPath;
 			[controller openAndSelectDocument:documents[0]];
@@ -1772,17 +1795,7 @@ namespace
 	if(!srcDocument)
 		return NO;
 
-	std::vector<document::document_ptr> newDocuments;
-	merge_documents_splitting_at(_documents, make_vector(srcDocument), droppedIndex, newDocuments);
-	self.documents = newDocuments;
-
-	if(_selectedDocument)
-	{
-		oak::uuid_t selectedUUID = _selectedDocument->identifier();
-		auto iter = std::find_if(newDocuments.begin(), newDocuments.end(), [&selectedUUID](document::document_ptr const& doc){ return doc->identifier() == selectedUUID; });
-		if(iter != newDocuments.end())
-			self.selectedTabIndex = iter - newDocuments.begin();
-	}
+	[self insertDocuments:{ srcDocument } atIndex:droppedIndex selecting:_selectedDocument andClosing:{ srcDocument->identifier() }];
 
 	if(operation == NSDragOperationMove && sourceTabBar != destTabBar)
 	{
@@ -2261,11 +2274,11 @@ namespace
 	[self openItems:@[ @{ @"path" : path } ] closingOtherTabs:NO];
 }
 
-// ===========================
-// = Go to Tab Menu Delegate =
-// ===========================
+// ============================
+// = Select Tab Menu Delegate =
+// ============================
 
-- (void)updateGoToMenu:(NSMenu*)aMenu
+- (void)updateSelectTabMenu:(NSMenu*)aMenu
 {
 	if(![self.window isKeyWindow])
 	{
@@ -2307,6 +2320,11 @@ namespace
 
 - (BOOL)validateMenuItem:(NSMenuItem*)menuItem
 {
+	static std::set<SEL> const delegateToFileBrowser = {
+		@selector(newFolder:), @selector(goBack:), @selector(goForward:),
+		@selector(reload:), @selector(deselectAll:)
+	};
+
 	BOOL active = YES;
 	if([menuItem action] == @selector(toggleFileBrowser:))
 		[menuItem setTitle:self.fileBrowserVisible ? @"Hide File Browser" : @"Show File Browser"];
@@ -2317,20 +2335,21 @@ namespace
 	}
 	else if([menuItem action] == @selector(newDocumentInDirectory:))
 		active = self.fileBrowserVisible && [self.fileBrowser directoryForNewItems] != nil;
-	else if([menuItem action] == @selector(newFolder:) || [menuItem action] == @selector(goBack:) || [menuItem action] == @selector(goForward:))
+	else if(delegateToFileBrowser.find([menuItem action]) != delegateToFileBrowser.end())
 		active = self.fileBrowserVisible && [self.fileBrowser validateMenuItem:menuItem];
 	else if([menuItem action] == @selector(moveDocumentToNewWindow:))
 		active = _documents.size() > 1;
 	else if([menuItem action] == @selector(selectNextTab:) || [menuItem action] == @selector(selectPreviousTab:))
 		active = _documents.size() > 1;
 	else if([menuItem action] == @selector(revealFileInProject:) || [menuItem action] == @selector(revealFileInProjectByExpandingAncestors:))
+	{
 		active = _selectedDocument && _selectedDocument->path() != NULL_STR;
+		[menuItem setTitle:active ? [NSString stringWithFormat:@"Select “%@”", [NSString stringWithCxxString:_selectedDocument->display_name()]] : @"Select Document"];
+	}
 	else if([menuItem action] == @selector(goToProjectFolder:))
 		active = self.projectPath != nil;
 	else if([menuItem action] == @selector(goToParentFolder:))
 		active = [self.window firstResponder] != self.textView;
-	else if([menuItem action] == @selector(reload:) || [menuItem action] == @selector(deselectAll:))
-		active = self.fileBrowserVisible;
 	else if([menuItem action] == @selector(moveFocus:))
 		[menuItem setTitle:self.window.firstResponder == self.textView ? @"Move Focus to File Browser" : @"Move Focus to Document"];
 	else if([menuItem action] == @selector(takeProjectPathFrom:))
@@ -2513,7 +2532,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 	{
 		document::document_ptr doc;
 		NSString* identifier = info[@"identifier"];
-		if(!identifier || !(doc = document::find(to_s(identifier), true)))
+		if(!identifier || !(doc = document::find(to_s(identifier))))
 		{
 			NSString* path = info[@"path"];
 			if(path && skipMissing && access([path fileSystemRepresentation], F_OK) != 0)
@@ -2778,24 +2797,8 @@ static NSUInteger DisableSessionSavingCount = 0;
 		static DocumentController* controller_with_documents (std::vector<document::document_ptr> const& documents, oak::uuid_t const& projectUUID = document::kCollectionAny)
 		{
 			DocumentController* controller = find_or_create_controller(documents, projectUUID);
-			if(controller.documents.empty())
-			{
-				controller.documents = documents;
-			}
-			else
-			{
-				std::vector<document::document_ptr> oldDocuments = controller.documents;
-				NSUInteger split = controller.selectedTabIndex;
-
-				if(is_disposable(oldDocuments[split]))
-						oldDocuments.erase(oldDocuments.begin() + split);
-				else	++split;
-
-				std::vector<document::document_ptr> newDocuments;
-				split = merge_documents_splitting_at(oldDocuments, documents, split, newDocuments, [controller disableTabReordering]);
-				controller.documents = newDocuments;
-				controller.selectedTabIndex = split;
-			}
+			auto documentToSelect = controller.documents.size() <= [controller disposableDocument].size() ? documents.front() : documents.back();
+			[controller insertDocuments:documents atIndex:controller.selectedTabIndex + 1 selecting:documentToSelect andClosing:[controller disposableDocument]];
 			return controller;
 		}
 
@@ -2838,10 +2841,10 @@ static NSUInteger DisableSessionSavingCount = 0;
 			{
 				controller.defaultProjectPath = [NSString stringWithCxxString:folder];
 				controller.fileBrowserVisible = YES;
-				controller.documents          = make_vector(create_untitled_document_in_folder(folder));
+				controller.documents          = { create_untitled_document_in_folder(folder) };
 				controller.fileBrowser.url    = [NSURL fileURLWithPath:[NSString stringWithCxxString:folder]];
 
-				[controller openAndSelectDocument:[controller documents][controller.selectedTabIndex]];
+				[controller openAndSelectDocument:controller.documents[controller.selectedTabIndex]];
 			}
 			bring_to_front(controller);
 		}
@@ -2858,7 +2861,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 			if(range != text::range_t::undefined)
 				document->set_selection(range);
 
-			DocumentController* controller = controller_with_documents(make_vector(document), collection);
+			DocumentController* controller = controller_with_documents({ document }, collection);
 			if(bringToFront)
 				bring_to_front(controller);
 			else if(![controller.window isVisible])
@@ -2866,7 +2869,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 			[controller openAndSelectDocument:document];
 		}
 
-		void run (bundle_command_t const& command, ng::buffer_t const& buffer, ng::ranges_t const& selection, document::document_ptr document, std::map<std::string, std::string> const& env, std::string const& pwd)
+		void run (bundle_command_t const& command, ng::buffer_api_t const& buffer, ng::ranges_t const& selection, document::document_ptr document, std::map<std::string, std::string> const& env, std::string const& pwd)
 		{
 			run_impl(command, buffer, selection, document, env, pwd);
 		}

@@ -190,7 +190,7 @@ namespace ng
 			return sel;
 		}
 
-		void will_replace (size_t from, size_t to, std::string const& str)
+		void will_replace (size_t from, size_t to, char const* buf, size_t len)
 		{
 			for(auto& mark : _marks)
 			{
@@ -199,19 +199,19 @@ namespace ng
 				{
 					if(mark.type == mark_t::kUnpairedMark || index != from && index != to)
 					{
-						index = from + str.size() - std::min(to - index, str.size());
+						index = from + len - std::min(to - index, len);
 					}
 					else
 					{
 						index = from;
 						if(mark.type == mark_t::kEndMark)
-							index += str.size();
+							index += len;
 					}
 				}
 				else if(from < index)
 				{
 					ASSERT_LT(to, index);
-					index = index + str.size() - (to - from);
+					index = index + len - (to - from);
 				}
 			}
 		}
@@ -342,6 +342,11 @@ namespace ng
 			if(fragments > 1)      _options["fragments"] = std::to_string(fragments);
 			if(columnar)           _options["columnar"]  = "1";
 		}
+
+		my_clipboard_entry_t (std::string const& content, std::map<std::string, std::string> const& options = { }) : clipboard_t::entry_t(content), _options(options)
+		{
+		}
+
 		std::map<std::string, std::string> const& options () const { return _options; }
 	private:
 		std::map<std::string, std::string> _options;
@@ -430,7 +435,6 @@ namespace ng
 							perror("waitpid");
 					});
 					dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-					dispatch_release(group);
 				}
 
 				unlink(scriptPath.c_str());
@@ -519,7 +523,7 @@ namespace ng
 
 		if(fragments > 1 && selections.size() == 1)
 		{
-			ASSERT(fragments == std::count(str.begin(), str.end(), '\n') + 1);
+			ASSERT_EQ(fragments, std::count(str.begin(), str.end(), '\n') + 1);
 			if(columnar)
 			{
 				index_t caret = dissect_columnar(buffer, selections).last().min();
@@ -648,7 +652,7 @@ namespace ng
 			_buffer.add_callback(this);
 		}
 
-		void will_replace (size_t from, size_t to, std::string const& str)
+		void will_replace (size_t from, size_t to, char const* buf, size_t len)
 		{
 			text::pos_t pos = _buffer.convert(from);
 
@@ -1052,7 +1056,30 @@ namespace ng
 
 			case kCut:                                          clipboard()->push_back(copy(_buffer, _selections)); _selections = apply(_buffer, _selections, _snippets, &transform::null); break;
 			case kCopy:                                         clipboard()->push_back(copy(_buffer, _selections));                                                                         break;
-			case kCopySelectionToFindPboard:                    find_clipboard()->push_back(copy(_buffer, dissect_columnar(_buffer, _selections).first()));                                                                    break;
+
+			case kCopySelectionToFindPboard:
+			{
+				std::set<std::string> set;
+				for(auto const& range : dissect_columnar(_buffer, _selections))
+				{
+					if(!range.empty())
+						set.insert(_buffer.substr(range.min().index, range.max().index));
+				}
+
+				if(set.size() > 1)
+				{
+					std::string regexp;
+					for(std::string const& str : set)
+						regexp.append("|" + regexp::escape(str));
+					find_clipboard()->push_back(std::make_shared<my_clipboard_entry_t>(regexp.substr(1), std::map<std::string, std::string>{ { "regularExpression", "1" } }));
+				}
+				else if(!set.empty())
+				{
+					find_clipboard()->push_back(std::make_shared<my_clipboard_entry_t>(*set.begin()));
+				}
+			}
+			break;
+
 			case kCopySelectionToReplacePboard:                 replace_clipboard()->push_back(copy(_buffer, dissect_columnar(_buffer, _selections).first()));                                                                 break;
 			case kPaste:                                        _selections = paste(_buffer, _selections, _snippets, clipboard()->current());                                               break;
 			case kPastePrevious:                                _selections = paste(_buffer, _selections, _snippets, clipboard()->previous());                                              break;

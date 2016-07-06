@@ -32,7 +32,7 @@ namespace
 {
 	struct open_file_context_t : file::open_context_t
 	{
-		open_file_context_t (std::string const& path, io::bytes_ptr existingContent, osx::authorization_t auth, file::open_callback_ptr callback, std::string const& virtualPath) : _state(kStateIdle), _next_state(kStateStart), _estimate_encoding_state(kEstimateEncodingStateBOM), _callback(callback), _path(path), _virtual_path(virtualPath), _authorization(auth), _content(existingContent), _file_type(kFileTypePlainText), _path_attributes(NULL_STR), _error(NULL_STR)
+		open_file_context_t (std::string const& path, io::bytes_ptr existingContent, osx::authorization_t auth, file::open_callback_ptr callback) : _state(kStateIdle), _next_state(kStateStart), _estimate_encoding_state(kEstimateEncodingStateBOM), _callback(callback), _path(path), _authorization(auth), _content(existingContent), _file_type(kFileTypePlainText), _path_attributes(NULL_STR), _error(NULL_STR)
 		{
 		}
 
@@ -98,7 +98,6 @@ namespace
 		file::open_callback_ptr _callback;
 
 		std::string _path;
-		std::string _virtual_path;
 		osx::authorization_t _authorization;
 
 		io::bytes_ptr _content;
@@ -221,24 +220,12 @@ static bool not_ascii (char ch)
 	return !(0x20 <= ch && ch < 0x80 || ch && strchr("\t\n\f\r\e", ch));
 }
 
-static io::bytes_ptr remove_bom (io::bytes_ptr content)
-{
-	if(content)
-	{
-		ASSERT_GE(content->size(), 3); ASSERT_EQ(std::string(content->get(), content->get() + 3), "\uFEFF");
-		memmove(content->get(), content->get()+3, content->size()-3);
-		content->resize(content->size()-3);
-	}
-	return content;
-}
-
-static io::bytes_ptr convert (io::bytes_ptr content, std::string const& from, std::string const& to, bool bom = false)
+static io::bytes_ptr convert (io::bytes_ptr content, std::string const& from, std::string const& to)
 {
 	if(from == kCharsetUnknown)
 		return io::bytes_ptr();
 
-	content = encoding::convert(content, from, to);
-	return bom ? remove_bom(content) : content;
+	return encoding::convert(content, from, to);
 }
 
 // ===================================
@@ -255,16 +242,6 @@ namespace file
 
 	void open_callback_t::select_charset (std::string const& path, io::bytes_ptr content, open_context_ptr context)
 	{
-	}
-
-	void open_callback_t::select_line_feeds (std::string const& path, io::bytes_ptr content, open_context_ptr context)
-	{
-		context->set_line_feeds(kLF);
-	}
-
-	void open_callback_t::select_file_type (std::string const& path, io::bytes_ptr content, open_context_ptr context)
-	{
-		context->set_file_type(kFileTypePlainText);
 	}
 
 } /* file */
@@ -359,10 +336,7 @@ namespace
 						{
 							std::string const charset = encoding::charset_from_bom(first, last);
 							if(charset != kCharsetNoEncoding)
-							{
 								_encoding.set_charset(charset);
-								_encoding.set_byte_order_mark(true);
-							}
 						}
 						break;
 
@@ -408,7 +382,7 @@ namespace
 					_state      = kStateIdle;
 					_next_state = kStateEstimateLineFeeds;
 
-					if(io::bytes_ptr decodedContent = convert(_content, _encoding.charset() == kCharsetNoEncoding ? kCharsetASCII : _encoding.charset(), kCharsetUTF8, _encoding.byte_order_mark()))
+					if(io::bytes_ptr decodedContent = convert(_content, _encoding.charset() == kCharsetNoEncoding ? kCharsetASCII : _encoding.charset(), kCharsetUTF8))
 							_content = decodedContent;
 					else	_next_state = kStateEstimateEncoding;
 
@@ -422,9 +396,7 @@ namespace
 					_next_state = kStateHarmonizeLineFeeds;
 
 					_encoding.set_newlines(text::estimate_line_endings(_content->begin(), _content->end()));
-					if(_encoding.newlines() != kMIX)
-							proceed();
-					else	_callback->select_line_feeds(_path, _content, shared_from_this());
+					proceed();
 				}
 				break;
 
@@ -442,7 +414,7 @@ namespace
 				case kStateExecuteTextImportFilter:
 				{
 					_state      = kStateIdle;
-					_next_state = kStateEstimateFileType;
+					_next_state = kStateEstimateTabSettings;
 
 					std::vector<bundles::item_ptr> filters;
 					for(auto const& item : filter::find(_path, _content, _path_attributes, filter::kBundleEventTextImport))
@@ -467,18 +439,6 @@ namespace
 				}
 				break;
 
-				case kStateEstimateFileType:
-				{
-					_state      = kStateIdle;
-					_next_state = kStateEstimateTabSettings;
-
-					_file_type = file::type(_path, _content, _virtual_path);
-					if(_file_type != NULL_STR)
-							proceed();
-					else	_callback->select_file_type(_virtual_path != NULL_STR ? _virtual_path : _path, _content, shared_from_this());
-				}
-				break;
-
 				case kStateEstimateTabSettings:
 				{
 					_state = kStateShowContent;
@@ -489,7 +449,7 @@ namespace
 				case kStateShowContent:
 				{
 					_state = kStateDone;
-					_callback->show_content(_path, _content, _attributes, _file_type, _encoding, _binary_import_filters, _text_import_filters);
+					_callback->show_content(_path, _content, _attributes, _encoding, _binary_import_filters, _text_import_filters);
 				}
 				break;
 			}
@@ -501,9 +461,9 @@ namespace
 
 namespace file
 {
-	void open (std::string const& path, osx::authorization_t auth, open_callback_ptr cb, io::bytes_ptr existingContent, std::string const& virtualPath)
+	void open (std::string const& path, osx::authorization_t auth, open_callback_ptr cb, io::bytes_ptr existingContent)
 	{
-		auto context = std::make_shared<open_file_context_t>(path, existingContent, auth, cb, virtualPath);
+		auto context = std::make_shared<open_file_context_t>(path, existingContent, auth, cb);
 		context->proceed();
 	}
 

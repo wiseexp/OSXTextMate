@@ -126,6 +126,8 @@ static NSAttributedString* AttributedStringForMatch (std::string const& text, si
 }
 @property (nonatomic, readwrite) NSUInteger countOfLeafs;
 @property (nonatomic, readwrite) NSUInteger countOfExcluded;
+@property (nonatomic, readwrite) NSUInteger countOfReadOnly;
+@property (nonatomic, readwrite) NSUInteger countOfExcludedReadOnly;
 @end
 
 @implementation FFResultNode
@@ -155,21 +157,10 @@ static NSAttributedString* AttributedStringForMatch (std::string const& text, si
 	}
 }
 
-- (void)setCountOfLeafs:(NSUInteger)countOfLeafs
-{
-	if(_countOfLeafs == countOfLeafs)
-		return;
-	_parent.countOfLeafs += countOfLeafs - _countOfLeafs;
-	_countOfLeafs = countOfLeafs;
-}
-
-- (void)setCountOfExcluded:(NSUInteger)countOfExcluded
-{
-	if(_countOfExcluded == countOfExcluded)
-		return;
-	_parent.countOfExcluded += countOfExcluded - _countOfExcluded;
-	_countOfExcluded = countOfExcluded;
-}
+- (void)setCountOfLeafs:(NSUInteger)count             { if(_countOfLeafs            != count) { _parent.countOfLeafs            += count - _countOfLeafs;            _countOfLeafs            = count; } }
+- (void)setCountOfExcluded:(NSUInteger)count          { if(_countOfExcluded         != count) { _parent.countOfExcluded         += count - _countOfExcluded;         _countOfExcluded         = count; } }
+- (void)setCountOfReadOnly:(NSUInteger)count          { if(_countOfReadOnly         != count) { _parent.countOfReadOnly         += count - _countOfReadOnly;         _countOfReadOnly         = count; } }
+- (void)setCountOfExcludedReadOnly:(NSUInteger)count  { if(_countOfExcludedReadOnly != count) { _parent.countOfExcludedReadOnly += count - _countOfExcludedReadOnly; _countOfExcludedReadOnly = count; } }
 
 - (void)addResultNode:(FFResultNode*)aMatch
 {
@@ -183,32 +174,35 @@ static NSAttributedString* AttributedStringForMatch (std::string const& text, si
 	aMatch.parent = self;
 
 	[(NSMutableArray*)_children addObject:aMatch];
-	self.countOfLeafs    += aMatch.countOfLeafs;
-	self.countOfExcluded += aMatch.ignored ? aMatch.countOfLeafs : aMatch.countOfExcluded;
+	self.countOfLeafs            += aMatch.countOfLeafs;
+	self.countOfExcluded         += aMatch.countOfExcluded;
+	self.countOfReadOnly         += aMatch.countOfReadOnly;
+	self.countOfExcludedReadOnly += aMatch.countOfExcludedReadOnly;
 }
 
 - (void)removeFromParent
 {
 	[(NSMutableArray*)_parent.children removeObject:self];
-	_parent.countOfExcluded -= _ignored ? _countOfLeafs : _countOfExcluded;
-	_parent.countOfLeafs    -= _countOfLeafs;
+	_parent.countOfExcludedReadOnly -= _countOfExcludedReadOnly;
+	_parent.countOfReadOnly         -= _countOfReadOnly;
+	_parent.countOfExcluded         -= _countOfExcluded;
+	_parent.countOfLeafs            -= _countOfLeafs;
 }
 
 - (void)setExcluded:(BOOL)flag
 {
 	if(_children)
 	{
-		if(!_ignored)
+		for(FFResultNode* child in _children)
 		{
-			for(FFResultNode* child in _children)
+			if(!child.isReadOnly)
 				child.excluded = flag;
 		}
 	}
 	else
 	{
-		if(_ignored)
-				_countOfExcluded = flag ? 1 : 0;
-		else	self.countOfExcluded = flag ? 1 : 0;
+		self.countOfExcluded         = flag ? 1 : 0;
+		self.countOfExcludedReadOnly = flag && _countOfReadOnly ? 1 : 0;
 	}
 }
 
@@ -217,19 +211,23 @@ static NSAttributedString* AttributedStringForMatch (std::string const& text, si
 	return _countOfExcluded == (_children ? _countOfLeafs : 1);
 }
 
-- (void)setIgnored:(BOOL)flag
+- (void)setReadOnly:(BOOL)flag
 {
-	if(_ignored == flag)
-		return;
-
-	_ignored = flag;
 	if(_children)
 	{
-		NSUInteger countOfExcluded = 0;
 		for(FFResultNode* child in _children)
-			countOfExcluded += (child.ignored = flag) || child.excluded ? 1 : 0;
-		self.countOfExcluded = countOfExcluded;
+			child.readOnly = flag;
 	}
+	else
+	{
+		self.countOfReadOnly         = flag ? 1 : 0;
+		self.countOfExcludedReadOnly = flag && self.excluded ? 1 : 0;
+	}
+}
+
+- (BOOL)isReadOnly
+{
+	return _countOfReadOnly == (_children ? _countOfLeafs : 1);
 }
 
 - (FFResultNode*)firstResultNode   { return [_children firstObject]; }

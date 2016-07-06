@@ -4,7 +4,7 @@
 
 namespace ng
 {
-	static size_t count_columns (buffer_t const& buffer, index_t caret, size_t tabSize)
+	static size_t count_columns (buffer_api_t const& buffer, index_t caret, size_t tabSize)
 	{
 		std::string const str = buffer.substr(buffer.begin(buffer.convert(caret.index).line), caret.index);
 		size_t len = 0;
@@ -13,7 +13,7 @@ namespace ng
 		return len + caret.carry;
 	}
 
-	ng::ranges_t write_unit_to_fd (buffer_t const& buffer, ranges_t const& ranges, size_t tabSize, int fd, input::type unit, input::type fallbackUnit, input_format::type format, scope::selector_t const& scopeSelector, std::map<std::string, std::string>& variables, bool* inputWasSelection) // TODO Move write_unit_to_fd to command framework.
+	ng::ranges_t write_unit_to_fd (buffer_api_t const& buffer, ranges_t const& ranges, size_t tabSize, int fd, input::type unit, input::type fallbackUnit, input_format::type format, scope::selector_t const& scopeSelector, std::map<std::string, std::string>& variables, bool* inputWasSelection) // TODO Move write_unit_to_fd to command framework.
 	{
 		bool noSelection = true;
 		for(auto const& range : ranges)
@@ -47,7 +47,7 @@ namespace ng
 			{
 				if(!std::exchange(first, false))
 					str += "\n";
-				str += format == input_format::xml ? to_xml(buffer, range.min().index, range.max().index) : buffer.substr(range.min().index, range.max().index);
+				str += format == input_format::xml ? buffer.xml_substr(range.min().index, range.max().index) : buffer.substr(range.min().index, range.max().index);
 			}
 
 			dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{

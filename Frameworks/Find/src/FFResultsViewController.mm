@@ -25,7 +25,7 @@ static FFResultNode* PreviousNode (FFResultNode* node)
 @end
 
 @implementation OakSearchResultsMatchCellView
-+ (NSSet*)keyPathsForValuesAffectingExcerptString { return [NSSet setWithArray:@[ @"objectValue", @"objectValue.ignored", @"objectValue.excluded", @"objectValue.replaceString", @"replaceString", @"showReplacementPreviews", @"backgroundStyle" ]]; }
++ (NSSet*)keyPathsForValuesAffectingExcerptString { return [NSSet setWithArray:@[ @"objectValue", @"objectValue.readOnly", @"objectValue.excluded", @"objectValue.replaceString", @"replaceString", @"showReplacementPreviews", @"backgroundStyle" ]]; }
 
 - (id)initWithFrame:(NSRect)aFrame
 {
@@ -44,7 +44,7 @@ static FFResultNode* PreviousNode (FFResultNode* node)
 - (NSAttributedString*)excerptString
 {
 	FFResultNode* item = self.objectValue;
-	NSAttributedString* res = [item excerptWithReplacement:item.ignored || item.excluded || !_showReplacementPreviews ? item.replaceString : self.replaceString];
+	NSAttributedString* res = [item excerptWithReplacement:item.isReadOnly || item.excluded || !_showReplacementPreviews ? item.replaceString : self.replaceString];
 	if(self.backgroundStyle == NSBackgroundStyleDark)
 	{
 		NSMutableAttributedString* str = [res mutableCopy];
@@ -60,7 +60,6 @@ static FFResultNode* PreviousNode (FFResultNode* node)
 // ==================================
 
 @interface OakSearchResultsHeaderCellView : NSTableCellView
-@property (nonatomic) NSString* countOfLeafs;
 @property (nonatomic) NSButton* countOfLeafsButton;
 @property (nonatomic) NSButton* removeButton;
 @property (nonatomic) BOOL showKeyEquivalent;
@@ -165,13 +164,6 @@ static FFResultNode* PreviousNode (FFResultNode* node)
 	{
 		self.imageView.image = item.icon;
 	}
-}
-
-- (void)setCountOfLeafs:(NSString*)aString
-{
-	_countOfLeafs = aString;
-	_countOfLeafsButton.title  = aString ?: @"0";
-	_countOfLeafsButton.hidden = aString == nil;
 }
 
 - (void)outlineViewItemDidExpandCollapse:(NSNotification*)aNotification
@@ -527,7 +519,7 @@ static FFResultNode* PreviousNode (FFResultNode* node)
 			[button unbind:NSValueBinding];
 		}
 
-		[button bind:NSEnabledBinding toObject:item withKeyPath:@"ignored" options:@{ NSValueTransformerNameBindingOption: NSNegateBooleanTransformerName }];
+		[button bind:NSEnabledBinding toObject:item withKeyPath:@"readOnly" options:@{ NSValueTransformerNameBindingOption: NSNegateBooleanTransformerName }];
 		[button bind:NSValueBinding toObject:item withKeyPath:@"excluded" options:@{ NSValueTransformerNameBindingOption: NSNegateBooleanTransformerName }];
 		button.state = item.excluded ? NSOffState : NSOnState;
 	}
@@ -556,7 +548,7 @@ static FFResultNode* PreviousNode (FFResultNode* node)
 		}
 
 		cellView.objectValue = item;
-		cellView.countOfLeafsButton.title = [NSString stringWithFormat:@"%lu", item.countOfLeafs];
+		cellView.countOfLeafsButton.title = [NSNumberFormatter localizedStringFromNumber:@(item.countOfLeafs) numberStyle:NSNumberFormatterDecimalStyle];
 		cellView.countOfLeafsButton.hidden = [outlineView isItemExpanded:item];
 	}
 	return res;

@@ -2,6 +2,35 @@ Title: Release Notes
 
 # Changes
 
+## 2016-07-06 (v2.0-beta.11.4)
+
+* Theme can now be changed per document type or folder by setting `theme` to the desired theme’s UUID in `.tm_properties` in the appropriate section, e.g. `[ *.md ]` or `[ build/** ]`.
+* Only bundle items with ⌘ in their key equivalent will be executed when the window’s text view is not active.
+* See [all changes since v2.0-beta.11](https://github.com/textmate/textmate/compare/v2.0-beta.11...v2.0-beta.11.4)
+
+## 2016-06-30 (v2.0-beta.11)
+
+* Inserting type identifiable information on first line of a document will now change the document’s type to match. For example in a new plain text document you can use `py⇥`, `rb⇥`, `pl⇥`, `php⇥` or similar (at the top) to insert a “shebang” line, and now TextMate will update the document’s type to reflect it.
+* Copying multiple selections to the find clipboard (⌘E) will construct a regular expression that matches any of the items copied. For example if you select both “foo” and “bar” then using ⌘E will put `foo|bar` on the find clipboard.
+* When opening a file with unknown type we no longer present a sheet forcing you to select what type to use. Instead, if the type of the document can be handled by a remote bundle, we suggest installing this bundle using a non-modal dialog above your document. Here you can hold down option (⌥) to change the “Not Now” button to “Never”.
+* See [all changes since v2.0-beta.10](https://github.com/textmate/textmate/compare/v2.0-beta.10...v2.0-beta.11)
+
+## 2016-06-22 (v2.0-beta.10)
+
+* The “Add byte order mark” checkbox has been removed from the save panel and so has the `useBOM` setting. Instead byte order mark (BOM) is now part of the encoding name, so via the save panel you need to select “Unicode — UTF-8 (BOM)” to include a BOM or set `encoding = "UTF-8//BOM"` in `.tm_properties`. For UTF-16/32 you also need to append `//BOM` to the encoding name (if you set this via `.tm_properties`).
+* You can change the font used for line numbers by setting `lineNumberFontName` via the `defaults` command. *[Mike Meyer]*
+* More menu changes, most notable the “Go” menu is now “File Browser” and its contents has been revised. The “Go to File…” item (often referred to as ⌘T) is now “File → Quick Open…”. *[Ronald Wampler]*
+* See [all changes since v2.0-beta.9.5](https://github.com/textmate/textmate/compare/v2.0-beta.9.5...v2.0-beta.10)
+
+## 2016-06-16 (v2.0-beta.9.5)
+
+* Improve folder search performance for large documents with few newlines and lots of matches.
+* `mate`: If the «mark» argument given to `--clear-mark` has a trailing slash then all marks with this prefix will be removed.
+* The *Jump to Selection* menu item has been moved to the Navigate menu and items in this menu are now using consistent naming. *[Ronald Wampler]*
+* Normally paragraph selection, as implicitly used by actions like *Reformat Paragraph*, will select lines up/down until there is an empty line. You can now indicate that a line should be a paragraph break by setting the `excludeFromParagraphSelection` scoped setting to `true`. The Source bundle sets it to `true` for the `comment.line` scope so that one can run “paragraph actions” on text with comments above/below and no separating empty line. *[Adam Strzelecki]*
+* If `git` is found in `/usr/bin` then we check if Xcode is installed (by calling `/usr/bin/xcode-select -p`) and if not, we ignore git. This is because `/usr/bin/git` is a shim that prompts the user to install Xcode, which has lead to some user confusion. Note though that we do not call `git` unless we actually find a `.git` folder in your project.
+* See [all changes since v2.0-beta.9.3](https://github.com/textmate/textmate/compare/v2.0-beta.9.3...v2.0-beta.9.5)
+
 ## 2016-05-30 (v2.0-beta.9.3)
 
 * Folding indented blocks no longer include trailing empty lines.

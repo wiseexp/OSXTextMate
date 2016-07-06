@@ -12,16 +12,15 @@ namespace ng
 		template <typename _InputIter>
 		memory_t::memory_t (_InputIter first, _InputIter last) : _offset(0)
 		{
-			_helper = std::make_shared<helper_t>(std::distance(first, last));
-			std::copy(first, last, _helper->bytes());
+			_helper = std::make_shared<helper_t>(first, last);
 		}
 
 		template <typename _InputIter>
 		void memory_t::insert (size_t pos, _InputIter first, _InputIter last)
 		{
 			ASSERT_EQ(_offset + pos, _helper->size());
-			std::copy(first, last, _helper->bytes() + _offset + pos);
-			_helper->grow(std::distance(first, last));
+			ASSERT_LE(std::distance(first, last), _helper->available());
+			_helper->append(first, last);
 		}
 
 		// =============
@@ -70,7 +69,7 @@ namespace ng
 			{
 				auto tmp = it;
 				--tmp;
-				if(tmp->key == tmp->value.size() && length <= tmp->value.free())
+				if(tmp->key == tmp->value.size() && length <= tmp->value.available())
 				{
 					tmp->value.insert(tmp->key, data, data + length);
 					tmp->key += length;
@@ -100,6 +99,40 @@ namespace ng
 			ASSERT_LE(i, size());
 			auto it = find_pos(i);
 			return it->value.bytes()[i - it->offset];
+		}
+
+		bool storage_t::operator== (storage_t const& rhs) const
+		{
+			if(size() != rhs.size())
+				return false;
+
+			auto lhsIter = _tree.begin(), lhsEnd = _tree.end();
+			auto rhsIter = rhs._tree.begin(), rhsEnd = rhs._tree.end();
+
+			size_t lhsOffset = 0, rhsOffset = 0;
+			while(lhsIter != lhsEnd && rhsIter != rhsEnd)
+			{
+				size_t size = std::min(lhsIter->key - lhsOffset, rhsIter->key - rhsOffset);
+				if(!std::equal(lhsIter->value.bytes() + lhsOffset, lhsIter->value.bytes() + lhsOffset + size, rhsIter->value.bytes() + rhsOffset))
+					return false;
+
+				lhsOffset += size;
+				rhsOffset += size;
+
+				if(lhsOffset == lhsIter->key)
+				{
+					lhsOffset = 0;
+					++lhsIter;
+				}
+
+				if(rhsOffset == rhsIter->key)
+				{
+					rhsOffset = 0;
+					++rhsIter;
+				}
+			}
+
+			return lhsIter == lhsEnd && rhsIter == rhsEnd;
 		}
 
 		std::string storage_t::substr (size_t first, size_t last) const

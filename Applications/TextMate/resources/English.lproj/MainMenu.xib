@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="10117" systemVersion="15F34" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none">
     <dependencies>
-        <deployment version="1070" identifier="macosx"/>
+        <deployment version="1080" identifier="macosx"/>
         <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="10117"/>
     </dependencies>
     <objects>
@@ -123,6 +123,11 @@
                             <menuItem title="Recent Projects…" keyEquivalent="O" id="609">
                                 <connections>
                                     <action selector="openFavorites:" target="-1" id="610"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem title="Quick Open…" keyEquivalent="t" id="301" userLabel="Quick Open…">
+                                <connections>
+                                    <action selector="goToFile:" target="-1" id="302"/>
                                 </connections>
                             </menuItem>
                             <menuItem title="Open Recent" id="124">
@@ -506,11 +511,6 @@ CA
                                         <menuItem isSeparatorItem="YES" id="239">
                                             <modifierMask key="keyEquivalentModifierMask" command="YES"/>
                                         </menuItem>
-                                        <menuItem title="Jump to Selection" keyEquivalent="j" id="240">
-                                            <connections>
-                                                <action selector="centerSelectionInVisibleArea:" target="-1" id="252"/>
-                                            </connections>
-                                        </menuItem>
                                     </items>
                                 </menu>
                             </menuItem>
@@ -809,14 +809,19 @@ CA
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <menu key="submenu" title="Navigate" id="422">
                         <items>
-                            <menuItem title="Go to Line…" keyEquivalent="l" id="389">
+                            <menuItem title="Jump to Line…" keyEquivalent="l" id="389">
                                 <connections>
                                     <action selector="orderFrontGoToLinePanel:" target="-1" id="390"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Go to Symbol…" keyEquivalent="T" id="556">
+                            <menuItem title="Jump to Symbol…" keyEquivalent="T" id="556">
                                 <connections>
                                     <action selector="showSymbolChooser:" target="-1" id="557"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem title="Jump to Selection" keyEquivalent="j" id="xcx-ye-h1c">
+                                <connections>
+                                    <action selector="centerSelectionInVisibleArea:" target="-1" id="KRn-Bg-XZK"/>
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="851"/>
@@ -825,21 +830,21 @@ CA
                                     <action selector="toggleCurrentBookmark:" target="-1" id="426"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Next Bookmark" keyEquivalent="" id="424">
+                            <menuItem title="Jump to Next Bookmark" keyEquivalent="" id="424">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="goToNextBookmark:" target="-1" id="427"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Previous Bookmark" keyEquivalent="" id="425">
+                            <menuItem title="Jump to Previous Bookmark" keyEquivalent="" id="425">
                                 <modifierMask key="keyEquivalentModifierMask" shift="YES"/>
                                 <connections>
                                     <action selector="goToPreviousBookmark:" target="-1" id="428"/>
                                 </connections>
                             </menuItem>
-                            <menuItem title="Go to Bookmark" id="594">
+                            <menuItem title="Jump to Bookmark" id="594">
                                 <modifierMask key="keyEquivalentModifierMask"/>
-                                <menu key="submenu" title="Go to Bookmark" id="595"/>
+                                <menu key="submenu" title="Jump to Bookmark" id="595"/>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="439"/>
                             <menuItem title="Jump To Next Mark" keyEquivalent="" id="gGW-Hn-MX6">
@@ -887,6 +892,13 @@ CA
                                 </menu>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="804"/>
+                            <menuItem title="Go to Related File" keyEquivalent="" id="303">
+                                <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>
+                                <connections>
+                                    <action selector="goToRelatedFile:" target="-1" id="305"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem isSeparatorItem="YES" id="8Tf-mh-Vpb"/>
                             <menuItem title="Move Focus to File Browser" id="803">
                                 <string key="keyEquivalent" base64-UTF8="YES">
 CQ
@@ -1026,24 +1038,9 @@ CQ
                         </items>
                     </menu>
                 </menuItem>
-                <menuItem title="Go" id="299">
-                    <menu key="submenu" title="Go" id="300">
+                <menuItem title="File Browser" id="299">
+                    <menu key="submenu" title="File Browser" id="300">
                         <items>
-                            <menuItem title="Go to File…" keyEquivalent="t" id="301">
-                                <connections>
-                                    <action selector="goToFile:" target="-1" id="302"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Go to Related File" keyEquivalent="" id="303">
-                                <modifierMask key="keyEquivalentModifierMask" option="YES" command="YES"/>
-                                <connections>
-                                    <action selector="goToRelatedFile:" target="-1" id="305"/>
-                                </connections>
-                            </menuItem>
-                            <menuItem title="Go to Tab" id="383">
-                                <menu key="submenu" title="Go to Tab" id="384"/>
-                            </menuItem>
-                            <menuItem isSeparatorItem="YES" id="440"/>
                             <menuItem title="Back" id="545">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
@@ -1062,12 +1059,18 @@ CQ
                                 </connections>
                             </menuItem>
                             <menuItem isSeparatorItem="YES" id="543"/>
-                            <menuItem title="Current Document" keyEquivalent="r" id="755">
+                            <menuItem title="Select Document" keyEquivalent="r" id="755">
                                 <modifierMask key="keyEquivalentModifierMask" control="YES" command="YES"/>
                                 <connections>
                                     <action selector="revealFileInProject:" target="-1" id="756"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Select None" keyEquivalent="A" id="85Q-AB-VLJ">
+                                <connections>
+                                    <action selector="deselectAll:" target="-1" id="t4D-M9-2cV"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem isSeparatorItem="YES" id="7OY-PJ-MZQ"/>
                             <menuItem title="Project Folder" keyEquivalent="P" id="771">
                                 <connections>
                                     <action selector="goToProjectFolder:" target="-1" id="773"/>
@@ -1159,6 +1162,9 @@ CQ
                                     <action selector="selectPreviousTab:" target="-1" id="337"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Select Tab" id="383" userLabel="Select Tab">
+                                <menu key="submenu" title="Select Tab" id="384"/>
+                            </menuItem>
                             <menuItem isSeparatorItem="YES" id="333">
                                 <modifierMask key="keyEquivalentModifierMask" command="YES"/>
                             </menuItem>
@@ -1198,7 +1204,7 @@ CQ
                 <outlet property="bundlesMenuItem" destination="265" id="794"/>
             </connections>
         </menu>
-        <window title="Go to Line" allowsToolTipsWhenApplicationIsInactive="NO" autorecalculatesKeyViewLoop="NO" releasedWhenClosed="NO" visibleAtLaunch="NO" frameAutosaveName="Go to Line" animationBehavior="default" id="391" userLabel="GoToLine" customClass="NSPanel">
+        <window title="Jump to Line" allowsToolTipsWhenApplicationIsInactive="NO" autorecalculatesKeyViewLoop="NO" releasedWhenClosed="NO" visibleAtLaunch="NO" frameAutosaveName="Jump to Line" animationBehavior="default" id="391" userLabel="GoToLine" customClass="NSPanel">
             <windowStyleMask key="styleMask" titled="YES" closable="YES"/>
             <windowCollectionBehavior key="collectionBehavior" moveToActiveSpace="YES"/>
             <windowPositionMask key="initialPositionMask" leftStrut="YES" rightStrut="YES" topStrut="YES" bottomStrut="YES"/>
@@ -1260,8 +1266,8 @@ DQ
         </window>
         <customObject id="581" customClass="OakSubmenuController">
             <connections>
-                <outlet property="goToMenu" destination="384" id="593"/>
                 <outlet property="marksMenu" destination="595" id="597"/>
+                <outlet property="selectTabMenu" destination="384" id="593"/>
             </connections>
         </customObject>
         <customObject id="711" customClass="NSFontManager"/>

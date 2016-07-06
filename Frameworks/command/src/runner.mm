@@ -115,14 +115,11 @@ static pid_t run_command (dispatch_group_t rootGroup, std::string const& cmd, in
 			perror("waitpid");
 	});
 
-	dispatch_retain(rootGroup);
 	dispatch_group_enter(rootGroup);
 	dispatch_group_notify(group, queue, ^{
 		completionHandler(status);
 		dispatch_group_leave(rootGroup);
-		dispatch_release(rootGroup);
 	});
-	dispatch_release(group);
 
 	return pid;
 }
@@ -139,18 +136,13 @@ namespace command
 	// = Command Runner =
 	// ==================
 
-	runner_t::runner_t (bundle_command_t const& command, ng::buffer_t const& buffer, ng::ranges_t const& selection, std::map<std::string, std::string> const& environment, std::string const& pwd, delegate_ptr delegate) : _command(command), _environment(environment), _directory(pwd), _delegate(delegate), _input_was_selection(false), _did_detach(false)
+	runner_t::runner_t (bundle_command_t const& command, ng::buffer_api_t const& buffer, ng::ranges_t const& selection, std::map<std::string, std::string> const& environment, std::string const& pwd, delegate_ptr delegate) : _command(command), _environment(environment), _directory(pwd), _delegate(delegate), _input_was_selection(false), _did_detach(false)
 	{
 		_dispatch_group = dispatch_group_create();
 		fix_shebang(&_command.command);
 	}
 
-	runner_t::~runner_t ()
-	{
-		dispatch_release(_dispatch_group);
-	}
-
-	runner_ptr runner (bundle_command_t const& command, ng::buffer_t const& buffer, ng::ranges_t const& selection, std::map<std::string, std::string> const& environment, delegate_ptr delegate, std::string const& pwd)
+	runner_ptr runner (bundle_command_t const& command, ng::buffer_api_t const& buffer, ng::ranges_t const& selection, std::map<std::string, std::string> const& environment, delegate_ptr delegate, std::string const& pwd)
 	{
 		return std::make_shared<runner_t>(command, buffer, selection, environment, pwd, delegate);
 	}

@@ -37,17 +37,18 @@ namespace ng
 	// = layout_t =
 	// ============
 
-	layout_t::layout_t (ng::buffer_t& buffer, theme_ptr const& theme, bool softWrap, bool scrollPastEnd, size_t wrapColumn, std::string const& folded, ng::layout_t::margin_t const& margin) : _folds(std::make_shared<folds_t>(buffer)), _buffer(buffer), _theme(theme), _tab_size(buffer.indent().tab_size()), _wrapping(softWrap), _scroll_past_end(scrollPastEnd), _wrap_column(wrapColumn), _margin(margin)
+	layout_t::layout_t (ng::buffer_t& buffer, theme_ptr const& theme, std::string const& fontName, CGFloat fontSize, bool softWrap, bool scrollPastEnd, size_t wrapColumn, std::string const& folded, ng::layout_t::margin_t const& margin) : _folds(std::make_shared<folds_t>(buffer)), _buffer(buffer), _tab_size(buffer.indent().tab_size()), _wrapping(softWrap), _scroll_past_end(scrollPastEnd), _wrap_column(wrapColumn), _margin(margin)
 	{
 		struct parser_callback_t : ng::callback_t
 		{
 			parser_callback_t (layout_t& layout) : layout(layout) { }
-			void did_replace (size_t from, size_t to, std::string const& str) { layout.did_erase(from, to); layout.did_insert(from, from + str.size()); }
+			void did_replace (size_t from, size_t to, char const* buf, size_t len) { layout.did_erase(from, to); layout.did_insert(from, from + len); }
 
 		private:
 			layout_t& layout;
 		};
 
+		_theme = theme->copy_with_font_name_and_size(fontName, fontSize);
 		setup_font_metrics();
 
 		_rows.insert(_rows.end(), row_key_t(0, default_line_height()));
@@ -85,7 +86,7 @@ namespace ng
 
 	void layout_t::set_theme (theme_ptr const& theme)
 	{
-		_theme = theme;
+		_theme = _theme ? theme->copy_with_font_name_and_size(_theme->font_name(), _theme->font_size()) : theme;
 		clear_text_widths();
 	}
 
@@ -327,9 +328,12 @@ namespace ng
 						std::swap(r1, r2);
 					}
 
-					res.push_back(OakRectMake(r1.origin.x, r1.origin.y, content_width() - r1.origin.x + _margin.left, r1.size.height));
-					res.push_back(OakRectMake(_margin.left, CGRectGetMaxY(r1), content_width(), CGRectGetMinY(r2) - CGRectGetMaxY(r1)));
-					res.push_back(OakRectMake(_margin.left, r2.origin.y, r2.origin.x - _margin.left, r2.size.height));
+					CGFloat firstLineX = r1.origin.x == _margin.left ? 0 : r1.origin.x;
+					CGFloat lastLineX  = r2.origin.x == _margin.left ? _margin.left : 0;
+					CGFloat totalWidth = _margin.left + content_width() + _margin.right;
+					res.push_back(OakRectMake(firstLineX, r1.origin.y, totalWidth - firstLineX, r1.size.height));
+					res.push_back(OakRectMake(0, CGRectGetMaxY(r1), totalWidth, CGRectGetMinY(r2) - CGRectGetMaxY(r1)));
+					res.push_back(OakRectMake(lastLineX, r2.origin.y, r2.origin.x - lastLineX, r2.size.height));
 				}
 			}
 		}

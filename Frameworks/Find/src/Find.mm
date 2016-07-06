@@ -16,6 +16,7 @@
 #import <regexp/format_string.h>
 #import <editor/editor.h>
 #import <document/collection.h>
+#import <settings/settings.h>
 
 OAK_DEBUG_VAR(Find_Base);
 
@@ -43,6 +44,8 @@ enum FindActionTag
 @property (nonatomic) FFResultNode* results;
 @property (nonatomic) NSUInteger countOfMatches;
 @property (nonatomic) NSUInteger countOfExcludedMatches;
+@property (nonatomic) NSUInteger countOfReadOnlyMatches;
+@property (nonatomic) NSUInteger countOfExcludedReadOnlyMatches;
 @property (nonatomic) BOOL closeWindowOnSuccess;
 @property (nonatomic) BOOL performingFolderSearch;
 
@@ -131,11 +134,11 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 // = Find actions =
 // ================
 
-+ (NSSet*)keyPathsForValuesAffectingCanReplaceAll         { return [NSSet setWithArray:@[ @"countOfMatches", @"countOfExcludedMatches", @"windowController.showsResultsOutlineView" ]]; }
-+ (NSSet*)keyPathsForValuesAffectingReplaceAllButtonTitle { return [NSSet setWithArray:@[ @"countOfMatches", @"countOfExcludedMatches", @"windowController.showsResultsOutlineView" ]]; }
++ (NSSet*)keyPathsForValuesAffectingCanReplaceAll         { return [NSSet setWithArray:@[ @"countOfMatches", @"countOfExcludedMatches", @"countOfReadOnlyMatches", @"countOfExcludedReadOnlyMatches", @"windowController.showsResultsOutlineView" ]]; }
++ (NSSet*)keyPathsForValuesAffectingReplaceAllButtonTitle { return [NSSet setWithArray:@[ @"countOfMatches", @"countOfExcludedMatches", @"countOfReadOnlyMatches", @"countOfExcludedReadOnlyMatches", @"windowController.showsResultsOutlineView" ]]; }
 
-- (BOOL)canReplaceAll                { return _windowController.showsResultsOutlineView ? (_countOfExcludedMatches < _countOfMatches) : YES; }
-- (NSString*)replaceAllButtonTitle   { return _windowController.showsResultsOutlineView && _countOfExcludedMatches && self.canReplaceAll ? @"Replace Selected" : @"Replace All"; }
+- (BOOL)canReplaceAll                { return _windowController.showsResultsOutlineView ? (_countOfExcludedMatches - _countOfExcludedReadOnlyMatches < _countOfMatches - _countOfReadOnlyMatches) : YES; }
+- (NSString*)replaceAllButtonTitle   { return _windowController.showsResultsOutlineView && (_countOfExcludedMatches || _countOfReadOnlyMatches && _countOfReadOnlyMatches != _countOfMatches) ? @"Replace Selected" : @"Replace All"; }
 
 - (IBAction)countOccurrences:(id)sender   { [self performFindAction:FindActionCountMatches   withWindowController:self.windowController]; }
 - (IBAction)findAll:(id)sender            { [self performFindAction:FindActionFindAll        withWindowController:self.windowController]; }
@@ -174,8 +177,6 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		{
 			case FindActionFindAll:
 			{
-				[self clearMatches];
-
 				FFDocumentSearch* folderSearch = [FFDocumentSearch new];
 				folderSearch.searchBinaryFiles = YES;
 				folderSearch.searchString = controller.findString;
@@ -198,8 +199,11 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 					globs.add_exclude_glob(settings.get(kSettingsExcludeDirectoriesKey,               NULL_STR), path::kPathItemDirectory);
 					globs.add_exclude_glob(settings.get(kSettingsExcludeFilesInFolderSearchKey,       NULL_STR), path::kPathItemFile);
 					globs.add_exclude_glob(settings.get(kSettingsExcludeFilesKey,                     NULL_STR), path::kPathItemFile);
-					for(auto key : { kSettingsExcludeInFolderSearchKey, kSettingsExcludeKey, kSettingsBinaryKey })
-						globs.add_exclude_glob(settings.get(key, NULL_STR));
+					globs.add_exclude_glob(settings.get(kSettingsExcludeInFolderSearchKey,            NULL_STR));
+					globs.add_exclude_glob(settings.get(kSettingsExcludeKey,                          NULL_STR));
+					if(!controller.searchBinaryFiles)
+						globs.add_exclude_glob(settings.get(kSettingsBinaryKey, NULL_STR));
+
 					globs.add_include_glob(controller.searchHiddenFolders ? "{,.}*" : "*", path::kPathItemDirectory);
 					globs.add_include_glob(to_s(controller.globString), path::kPathItemFile);
 
@@ -255,7 +259,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 							doc->set_content(NULL_STR);
 						}
 
-						parent.ignored = YES;
+						parent.readOnly = YES;
 						replaceCount += replacements.size();
 						++fileCount;
 					}
@@ -373,15 +377,17 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 
 		[self unbind:@"countOfMatches"];
 		[self unbind:@"countOfExcludedMatches"];
+		[self unbind:@"countOfReadOnlyMatches"];
+		[self unbind:@"countOfExcludedReadOnlyMatches"];
 	}
 
 	_windowController.resultsViewController.results = _results = [FFResultNode new];
-	[self bind:@"countOfMatches" toObject:_results withKeyPath:@"countOfLeafs" options:nil];
-	[self bind:@"countOfExcludedMatches" toObject:_results withKeyPath:@"countOfExcluded" options:nil];
 }
 
 - (void)setDocumentSearch:(FFDocumentSearch*)newSearcher
 {
+	[self clearMatches];
+
 	if(_documentSearch)
 	{
 		[_documentSearch removeObserver:self forKeyPath:@"currentPath"];
@@ -418,7 +424,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 			doc->add_mark(m.range.from, kSearchMarkIdentifier);
 
 		FFResultNode* node = [FFResultNode resultNodeWithMatch:m];
-		if(!parent || parent.document->identifier() != node.document->identifier())
+		if(!parent || *parent.document != *node.document)
 			[_results addResultNode:(parent = [FFResultNode resultNodeWithMatch:m baseDirectory:_documentSearch.directory])];
 		[parent addResultNode:node];
 	}
@@ -447,6 +453,11 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	if(!_documentSearch)
 		return;
 
+	[self bind:@"countOfMatches" toObject:_results withKeyPath:@"countOfLeafs" options:nil];
+	[self bind:@"countOfExcludedMatches" toObject:_results withKeyPath:@"countOfExcluded" options:nil];
+	[self bind:@"countOfReadOnlyMatches" toObject:_results withKeyPath:@"countOfReadOnly" options:nil];
+	[self bind:@"countOfExcludedReadOnlyMatches" toObject:_results withKeyPath:@"countOfExcludedReadOnly" options:nil];
+
 	[self addResultsToPasteboard:self];
 
 	NSString* fmt = MSG_ZERO_MATCHES_FMT;
@@ -469,8 +480,8 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		formatter.maximumFractionDigits = 1;
 		NSString* seconds = [formatter stringFromNumber:@([_documentSearch searchDuration])];
 
-		self.windowController.statusString          = [msg stringByAppendingFormat:([_documentSearch scannedFileCount] == 1 ? MSG_SEARCHED_FILES_ONE : MSG_SEARCHED_FILES_MULTIPLE), [NSNumberFormatter localizedStringFromNumber:@([_documentSearch scannedFileCount]) numberStyle:NSNumberFormatterDecimalStyle], seconds];
-		self.windowController.alternateStatusString = [msg stringByAppendingFormat:MSG_SEARCHED_BYTES, [NSString stringWithCxxString:text::format_size([_documentSearch scannedByteCount])], seconds];
+		self.windowController.statusString          = [msg stringByAppendingFormat:([_documentSearch scannedFileCount] == 1 ? MSG_SEARCHED_FILES_ONE : MSG_SEARCHED_FILES_MULTIPLE), seconds, [NSNumberFormatter localizedStringFromNumber:@([_documentSearch scannedFileCount]) numberStyle:NSNumberFormatterDecimalStyle]];
+		self.windowController.alternateStatusString = [msg stringByAppendingFormat:MSG_SEARCHED_BYTES, seconds, [NSString stringWithCxxString:text::format_size([_documentSearch scannedByteCount])]];
 	}
 
 	__weak __block id observerId = [[NSNotificationCenter defaultCenter] addObserverForName:OakPasteboardDidChangeNotification object:[OakPasteboard pasteboardWithName:NSFindPboard] queue:nil usingBlock:^(NSNotification*){
@@ -550,9 +561,9 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	_windowController.statusString = [NSString stringWithFormat:fmt, [_documentSearch searchString], [NSNumberFormatter localizedStringFromNumber:@(self.countOfMatches) numberStyle:NSNumberFormatterDecimalStyle]];
 }
 
-// ==================
-// = Go to… Submenu =
-// ==================
+// =======================
+// = Select Tab… Submenu =
+// =======================
 
 - (IBAction)takeSelectedPathFrom:(id)sender
 {
@@ -561,7 +572,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		[_windowController.resultsViewController showResultNode:item.firstResultNode];
 }
 
-- (void)updateGoToMenu:(NSMenu*)aMenu
+- (void)updateSelectTabMenu:(NSMenu*)aMenu
 {
 	if(self.countOfMatches == 0)
 	{
@@ -641,9 +652,9 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	if(copyActions.find(aMenuItem.action) != copyActions.end())
 		return [_results countOfLeafs] != 0;
 	else if(aMenuItem.action == @selector(checkAll:))
-		return self.countOfExcludedMatches > 0;
+		return _countOfExcludedMatches > _countOfExcludedReadOnlyMatches;
 	else if(aMenuItem.action == @selector(uncheckAll:) )
-		return self.countOfExcludedMatches < self.countOfMatches;
+		return _countOfExcludedMatches - _countOfExcludedReadOnlyMatches < _countOfMatches - _countOfReadOnlyMatches;
 	return YES;
 }
 @end
