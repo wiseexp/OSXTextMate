@@ -25,6 +25,7 @@
 #import <cf/cf.h>
 #import <command/runner.h>
 #import <document/collection.h>
+#import <document/OakDocument.h>
 #import <file/type.h>
 #import <layout/layout.h>
 #import <ns/ns.h>
@@ -247,7 +248,7 @@ struct document_view_t : ng::buffer_api_t
 		_editor->set_find_clipboard(get_clipboard(NSFindPboard));
 		_editor->set_replace_clipboard(get_clipboard(OakReplacePboard));
 
-		settings_t const settings = settings_for_path(_document->virtual_path(), _document->file_type() + " " + scopeAttributes, path::parent(_document->path()));
+		settings_t const settings = settings_for_path(_document->logical_path(), _document->file_type() + " " + scopeAttributes, path::parent(_document->path()));
 		invisibles_map = settings.get(kSettingsInvisiblesMapKey, "");
 
 		bool softWrap     = settings.get(kSettingsSoftWrapKey, false);
@@ -289,6 +290,7 @@ struct document_view_t : ng::buffer_api_t
 	oak::uuid_t identifier () const                 { return _document->identifier(); }
 	std::string path () const                       { return _document->path(); }
 	std::string virtual_path () const               { return _document->virtual_path(); }
+	std::string logical_path () const               { return _document->logical_path(); }
 	std::string file_type () const                  { return _document->file_type(); }
 	void set_file_type (std::string const& newType) { _document->set_file_type(newType); }
 
@@ -791,6 +793,9 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 	if(documentView)
 	{
+		[[NSNotificationCenter defaultCenter] removeObserver:self name:OakDocumentWillSaveNotification object:document->document()];
+		[[NSNotificationCenter defaultCenter] removeObserver:self name:OakDocumentDidSaveNotification object:document->document()];
+
 		[self updateDocumentMetadata];
 
 		documentView->remove_callback(callback);
@@ -857,6 +862,10 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 		documentView->add_callback(callback);
 
+		// TODO Pre and post save actions should be handled by OakDocument once we have OakDocumentEditor
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(documentWillSave:) name:OakDocumentWillSaveNotification object:document->document()];
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(documentDidSave:) name:OakDocumentDidSaveNotification object:document->document()];
+
 		[self resetBlinkCaretTimer];
 		[self setNeedsDisplay:YES];
 		_links.reset();
@@ -889,8 +898,6 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 		[self registerForDraggedTypes:[[self class] dropTypes]];
 
-		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(documentWillSave:) name:@"OakDocumentNotificationWillSave" object:nil];
-		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(documentDidSave:) name:@"OakDocumentNotificationDidSave" object:nil];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(userDefaultsDidChange:) name:NSUserDefaultsDidChangeNotification object:[NSUserDefaults standardUserDefaults]];
 	}
 	return self;
@@ -904,10 +911,6 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 - (void)documentWillSave:(NSNotification*)aNotification
 {
-	NSWindow* window = [[aNotification userInfo] objectForKey:@"window"];
-	if(window != self.window)
-		return;
-
 	for(auto const& item : bundles::query(bundles::kFieldSemanticClass, "callback.document.will-save", [self scopeContext], bundles::kItemTypeMost, oak::uuid_t(), false))
 		[self performBundleItem:item];
 
@@ -916,10 +919,6 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 - (void)documentDidSave:(NSNotification*)aNotification
 {
-	NSWindow* window = [[aNotification userInfo] objectForKey:@"window"];
-	if(window != self.window || documentView->path() == NULL_STR)
-		return;
-
 	for(auto const& item : bundles::query(bundles::kFieldSemanticClass, "callback.document.did-save", [self scopeContext], bundles::kItemTypeMost, oak::uuid_t(), false))
 		[self performBundleItem:item];
 }
@@ -1748,7 +1747,7 @@ doScroll:
 		res << [self.delegate variables];
 
 	res = bundles::scope_variables(res, [self scopeContext]);
-	res = variables_for_path(res, documentView->virtual_path(), [self scopeContext].right, path::parent(documentView->path()));
+	res = variables_for_path(res, documentView->logical_path(), [self scopeContext].right, path::parent(documentView->path()));
 	return res;
 }
 
@@ -1805,7 +1804,7 @@ doScroll:
 		case bundles::kItemTypeGrammar:
 		{
 			documentView->set_file_type(item->value_for_field(bundles::kFieldGrammarScope));
-			file::set_type(documentView->virtual_path(), item->value_for_field(bundles::kFieldGrammarScope));
+			file::set_type(documentView->logical_path(), item->value_for_field(bundles::kFieldGrammarScope));
 		}
 		break;
 	}

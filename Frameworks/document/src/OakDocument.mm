@@ -3,11 +3,15 @@
 #import "Printing.h"
 #import "watch.h"
 #import "merge.h"
-#import "document.h" // {open,save}_callback_ptr + kBookmarkIdentifier
+#import "document.h" // kBookmarkIdentifier
 #import <OakFoundation/OakFoundation.h>
 #import <OakFoundation/NSString Additions.h>
 #import <OakAppKit/OakAppKit.h>
+#import <OakAppKit/OakEncodingPopUpButton.h>
+#import <OakAppKit/OakSavePanel.h>
+#import <OakAppKit/NSAlert Additions.h>
 #import <BundlesManager/BundlesManager.h>
+#import <authorization/constants.h>
 #import <cf/run_loop.h>
 #import <ns/ns.h>
 #import <settings/settings.h>
@@ -142,30 +146,10 @@ namespace document
 
 NSString* OakDocumentContentDidChangeNotification = @"OakDocumentContentDidChangeNotification";
 NSString* OakDocumentMarksDidChangeNotification   = @"OakDocumentMarksDidChangeNotification";
+NSString* OakDocumentWillSaveNotification         = @"OakDocumentWillSaveNotification";
 NSString* OakDocumentDidSaveNotification          = @"OakDocumentDidSaveNotification";
 NSString* OakDocumentWillCloseNotification        = @"OakDocumentWillCloseNotification";
-
-static NSString* FileExtensionForGrammar (parse::grammar_ptr grammar)
-{
-	if(!grammar)
-		return nil;
-
-	bundles::item_ptr grammarItem = bundles::lookup(grammar->uuid());
-	if(!grammarItem)
-		return nil;
-
-	plist::array_t fileTypes;
-	if(!plist::get_key_path(grammarItem->plist(), "fileTypes", fileTypes))
-		return nil;
-
-	for(auto const& type : fileTypes)
-	{
-		if(std::string const* ext = boost::get<std::string>(&type))
-			return to_ns(*ext);
-	}
-
-	return nil;
-}
+NSString* OakDocumentWillShowAlertNotification    = @"OakDocumentWillShowAlertNotification";
 
 @interface OakDocument ()
 {
@@ -186,8 +170,9 @@ static NSString* FileExtensionForGrammar (parse::grammar_ptr grammar)
 @property (nonatomic) NSInteger backupRevision;
 @property (nonatomic) BOOL observeFileSystem;
 @property (nonatomic) BOOL needsImportDocumentChanges;
+@property (nonatomic, readonly) BOOL shouldSniffFileType;
 
-@property (nonatomic) NSArray<void(^)(BOOL, NSString*, oak::uuid_t const&)>* loadCompletionHandlers;
+@property (nonatomic) NSArray<void(^)(OakDocumentIOResult, NSString*, oak::uuid_t const&)>* loadCompletionHandlers;
 
 // These are also exposed in ‘OakDocument Private.h’
 @property (nonatomic) NSInteger   revision;
@@ -252,6 +237,11 @@ private:
 	return [NSSet setWithObjects:@"onDisk", @"revision", @"savedRevision", @"bufferEmpty", nil];
 }
 
+- (NSString*)description
+{
+	return [NSString stringWithFormat:@"<%@: %@>", [self class], self.displayName];
+}
+
 // ==================
 // = Helper Methods =
 // ==================
@@ -291,7 +281,7 @@ private:
 		variables["TM_DIRECTORY"] = path::parent(to_s(_path));
 	}
 
-	settings_t const settings = settings_for_path(to_s(_virtualPath ?: _path), to_s(_fileType), path::parent(to_s(_path)), variables);
+	settings_t const settings = settings_for_path(to_s(_virtualPath ?: _path), to_s(_fileType), to_s(_directory ?: [_path stringByDeletingLastPathComponent]), variables);
 	if(updateSpelling)
 	{
 		self.spellingLanguage = to_ns(settings.get(kSettingsSpellingLanguageKey, ""));
@@ -368,10 +358,10 @@ private:
 			if(path::get_attr(path, "com.macromates.backup.modified") == "YES")
 				_savedRevision = _revision-1;
 
-			break;
+			return self;
 		}
 	}
-	return self;
+	return nil;
 }
 
 + (instancetype)documentWithPath:(NSString*)aPath
@@ -413,6 +403,37 @@ private:
 	return _untitledCount == 1 ? @"untitled" : [NSString stringWithFormat:@"untitled %lu", _untitledCount];
 }
 
+- (NSString*)displayNameWithExtension:(BOOL)flag
+{
+	NSString* res = [self.displayName stringByReplacingOccurrencesOfString:@"/" withString:@":"];
+	if(!flag)
+		return res;
+
+	if(_customName && OakNotEmptyString([res pathExtension]))
+		return res;
+
+	if(_path)
+		return [_path lastPathComponent];
+
+	if(_buffer && _buffer->grammar())
+	{
+		if(bundles::item_ptr item = bundles::lookup(_buffer->grammar()->uuid()))
+		{
+			if(NSString* ext = to_ns(item->value_for_field(bundles::kFieldGrammarExtension)))
+				return [res stringByAppendingPathExtension:ext];
+		}
+	}
+	else if(_fileType)
+	{
+		for(auto const& item : bundles::query(bundles::kFieldGrammarScope, to_s(_fileType)))
+		{
+			if(NSString* ext = to_ns(item->value_for_field(bundles::kFieldGrammarExtension)))
+				return [res stringByAppendingPathExtension:ext];
+		}
+	}
+	return res;
+}
+
 - (void)setPath:(NSString*)newPath
 {
 	NSString* path = to_ns(path::resolve(to_s(newPath)));
@@ -442,8 +463,11 @@ private:
 		return;
 
 	_fileType = newType;
-	[self setBufferGrammarForCurrentFileType];
-	[self updateSpellingSettings:YES andIndentSettings:YES];
+	if(self.isOpen)
+	{
+		[self setBufferGrammarForCurrentFileType];
+		[self updateSpellingSettings:YES andIndentSettings:YES];
+	}
 }
 
 - (std::map<std::string, std::string>)extendedAttributeds
@@ -505,14 +529,7 @@ private:
 	if(![[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nullptr])
 		return nil;
 
-	path = [path stringByAppendingPathComponent:[self.displayName stringByReplacingOccurrencesOfString:@"/" withString:@":"]];
-
-	if(_buffer && (!_path || _customName && OakIsEmptyString([_customName pathExtension])))
-	{
-		if(NSString* ext = FileExtensionForGrammar(_buffer->grammar()))
-			path = [path stringByAppendingPathExtension:ext];
-	}
-
+	path = [path stringByAppendingPathComponent:[self displayNameWithExtension:YES]];
 	return to_ns(path::unique(to_s(path)));
 }
 
@@ -571,12 +588,24 @@ private:
 // = Load Document =
 // =================
 
-- (void)loadModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID))block
+- (void)updateRecentDocumentMenu
+{
+	if(_recentTrackingDisabled || !_path || _virtualPath)
+		return;
+
+	NSURL* url = [NSURL fileURLWithPath:_path];
+	CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+		// This is not thread-safe so we ensure that we are on the main thread
+		[[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:url];
+	});
+}
+
+- (void)loadModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID))block
 {
 	if(++self.openCount != 1)
 	{
 		if(!_loadCompletionHandlers)
-				block(YES, nil, oak::uuid_t());
+				block(OakDocumentIOResultSuccess, nil, oak::uuid_t());
 		else	_loadCompletionHandlers = [_loadCompletionHandlers arrayByAddingObject:block];
 		return;
 	}
@@ -595,12 +624,12 @@ private:
 			self.savedRevision = _revision-1;
 		}
 
-		return block(YES, nil, oak::uuid_t());
+		return block(OakDocumentIOResultSuccess, nil, oak::uuid_t());
 	}
 
 	struct callback_t : file::open_callback_t
 	{
-		callback_t (OakDocument* self, NSWindow* window, void(^block)(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID)) : _self(self), _window(window), _block(block) { }
+		callback_t (OakDocument* self, NSWindow* window, void(^block)(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID)) : _self(self), _window(window), _block(block) { }
 
 		void select_charset (std::string const& path, io::bytes_ptr content, file::open_context_ptr context)
 		{
@@ -619,9 +648,9 @@ private:
 			if(!probabilities.empty() && probabilities.begin()->first < 1)
 				controller.encoding = [NSString stringWithCxxString:probabilities.begin()->second];
 
-			[controller.window layoutIfNeeded];
-			OakShowSheetForWindow(controller.window, _window, ^(NSInteger returnCode){
-				if(returnCode != NSRunAbortedResponse)
+			[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentWillShowAlertNotification object:_self];
+			[controller beginSheetModalForWindow:_window completionHandler:^(NSModalResponse response){
+				if(response != NSModalResponseAbort)
 				{
 					context->set_charset(to_s(controller.encoding));
 					if(controller.trainClassifier)
@@ -630,13 +659,13 @@ private:
 						db.save(kEncodingFrequenciesPath);
 					}
 				}
-			});
+			}];
 		}
 
 		void show_error (std::string const& path, std::string const& message, oak::uuid_t const& filter)
 		{
 			[_self didLoadContent:io::bytes_ptr() attributes:{ } encoding:{ }];
-			_block(NO, to_ns(message), filter);
+			_block(OakDocumentIOResultFailure, to_ns(message), filter);
 		}
 
 		void show_content (std::string const& path, io::bytes_ptr content, std::map<std::string, std::string> const& attributes, encoding::type const& encoding, std::vector<oak::uuid_t> const& binaryImportFilters, std::vector<oak::uuid_t> const& textImportFilters)
@@ -645,7 +674,7 @@ private:
 
 			// Check if user has an explicit binding for this path (e.g. *.md → Markdown)
 			if(!_self.fileType && docPath)
-				_self.fileType = to_ns(settings_for_path(to_s(docPath)).get(kSettingsFileTypeKey, NULL_STR));
+				_self.fileType = to_ns(settings_for_path(to_s(docPath), scope::scope_t(), to_s(_self.directory ?: [_self.path stringByDeletingLastPathComponent])).get(kSettingsFileTypeKey, NULL_STR));
 
 			// Check if a grammar recognizes the content (e.g. #!/usr/bin/ruby → Ruby)
 			if(!_self.fileType)
@@ -656,13 +685,13 @@ private:
 				_self.fileType = to_ns(file::type_from_path(to_s(docPath)));
 
 			[_self didLoadContent:content attributes:attributes encoding:encoding];
-			_block(YES, nil, oak::uuid_t());
+			_block(OakDocumentIOResultSuccess, nil, oak::uuid_t());
 		}
 
 	private:
 		OakDocument* _self;
 		NSWindow* _window;
-		void(^_block)(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID);
+		void(^_block)(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID);
 	};
 
 	io::bytes_ptr content;
@@ -676,11 +705,11 @@ private:
 	}
 
 	self.loadCompletionHandlers = @[ block ];
-	auto cb = std::make_shared<callback_t>(self, aWindow, ^(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID){
+	auto cb = std::make_shared<callback_t>(self, aWindow, ^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
 		auto blocks = self.loadCompletionHandlers;
 		self.loadCompletionHandlers = nil;
-		for(void(^f)(BOOL, NSString*, oak::uuid_t const&) in blocks)
-			f(success, errorMessage, filterUUID);
+		for(void(^f)(OakDocumentIOResult, NSString*, oak::uuid_t const&) in blocks)
+			f(result, errorMessage, filterUUID);
 	});
 	file::open(to_s(_path), _authorization, cb, content);
 }
@@ -736,17 +765,15 @@ private:
 	self.diskNewlines   = to_ns(encoding.newlines());
 
 	[self snapshot];
+	[self updateRecentDocumentMenu];
 	self.observeFileSystem = YES;
-
-	if(!_recentTrackingDisabled && _path && !_virtualPath)
-		[[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:_path]];
 }
 
 // =================
 // = Save Document =
 // =================
 
-- (void)didSaveContent:(io::bytes_ptr)content atPath:(NSString*)aPath withEncoding:(encoding::type)encoding success:(BOOL)success
+- (void)didSaveAtPath:(NSString*)aPath withEncoding:(encoding::type)encoding success:(BOOL)success
 {
 	if(success)
 	{
@@ -757,17 +784,35 @@ private:
 
 		[self snapshot];
 		[self removeBackup];
+		[self updateRecentDocumentMenu];
 
-		if(!_recentTrackingDisabled && _path && !_virtualPath)
-			[[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:[NSURL fileURLWithPath:_path]];
 		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentDidSaveNotification object:self];
 	}
 	self.observeFileSystem = self.isOpen;
 }
 
-- (void)trySaveUsingCallback:(document::save_callback_ptr)callback forDocument:(document::document_ptr)document
+- (void)saveModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID))block
 {
-	if(_buffer && _path)
+	if(!self.isOpen && self.isDocumentEdited && _backupPath)
+	{
+		[self loadModalForWindow:aWindow completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
+			if(result == OakDocumentIOResultSuccess)
+			{
+				[self saveModalForWindow:aWindow completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
+					block(result, errorMessage, filterUUID);
+					[self close];
+				}];
+			}
+			else
+			{
+				NSString* errorMessage = [NSString stringWithFormat:@"Cannot save ‘%@’: Failed to restore backup ‘%@’.", self.displayName, [_backupPath stringByAbbreviatingWithTildeInPath]];
+				block(OakDocumentIOResultFailure, errorMessage, oak::uuid_t());
+			}
+		}];
+		return;
+	}
+
+	if(_buffer)
 	{
 		self.observeFileSystem = NO;
 
@@ -782,7 +827,7 @@ private:
 
 		encoding::type encoding = encoding::type(to_s(_diskNewlines), to_s(_diskEncoding));
 
-		settings_t const settings = settings_for_path(to_s(_path));
+		settings_t const settings = settings_for_path(to_s(_path), to_s(_fileType), to_s(_directory ?: [_path stringByDeletingLastPathComponent]));
 		if(encoding.charset() == kCharsetNoEncoding)
 			encoding.set_charset(settings.get(kSettingsEncodingKey, kCharsetUTF8));
 		if(encoding.newlines() == NULL_STR)
@@ -790,40 +835,128 @@ private:
 
 		struct callback_t : file::save_callback_t
 		{
-			callback_t (OakDocument* document, document::document_ptr cppdocument, document::save_callback_ptr callback, bool closeDocument) : _document(document), _cppDocument(cppdocument), _callback(callback), _close_document(closeDocument)
+			callback_t (OakDocument* document, NSWindow* window, void(^block)(OakDocumentIOResult result, NSString* path, encoding::type const& encoding, NSString* errorMessage, oak::uuid_t const& filterUUID)) : _document(document), _window(window), _block(block)
 			{
 			}
 
-			void select_path (std::string const& path, io::bytes_ptr content, file::save_context_ptr context)                                     { _callback->select_path(path, content, context); }
-			void select_make_writable (std::string const& path, io::bytes_ptr content, file::save_context_ptr context)                            { _callback->select_make_writable(path, content, context); }
-			void select_create_parent (std::string const& path, io::bytes_ptr content, file::save_context_ptr context)                            { _callback->select_create_parent(path, content, context); }
-			void obtain_authorization (std::string const& path, io::bytes_ptr content, osx::authorization_t auth, file::save_context_ptr context) { _callback->obtain_authorization(path, content, auth, context); }
-			void select_charset (std::string const& path, io::bytes_ptr content, std::string const& charset, file::save_context_ptr context)      { _callback->select_charset(path, content, charset, context); }
+			void select_path (std::string const& path, io::bytes_ptr content, file::save_context_ptr context)
+			{
+				if(!_window)
+					return;
+
+				[OakSavePanel showWithPath:[_document displayNameWithExtension:YES] directory:_document.directory fowWindow:_window encoding:encoding::type(to_s(_document.diskNewlines), to_s(_document.diskEncoding)) completionHandler:^(NSString* path, encoding::type const& encoding){
+					if(path)
+					{
+						_document.path         = path;
+						_document.diskEncoding = to_ns(encoding.charset());
+						_document.diskNewlines = to_ns(encoding.newlines());
+						context->set_path(to_s(path));
+					}
+					else
+					{
+						_cancel = true;
+					}
+				}];
+			}
+
+			void select_make_writable (std::string const& path, io::bytes_ptr content, file::save_context_ptr context)
+			{
+				if(!_window)
+					return;
+
+				[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentWillShowAlertNotification object:_document];
+				NSAlert* alert = [NSAlert tmAlertWithMessageText:[NSString stringWithFormat:@"The file “%@” is locked.", _document.displayName] informativeText:@"Do you want to overwrite it anyway?" buttons:@"Overwrite", @"Cancel", nil];
+				OakShowAlertForWindow(alert, _window, ^(NSInteger returnCode){
+					if(returnCode == NSAlertFirstButtonReturn)
+							context->set_make_writable(true);
+					else	_cancel = true;
+				});
+			}
+
+			void select_create_parent (std::string const& path, io::bytes_ptr content, file::save_context_ptr context)
+			{
+				if(!_window)
+					return;
+
+				[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentWillShowAlertNotification object:_document];
+				NSAlert* alert = [NSAlert tmAlertWithMessageText:[NSString stringWithFormat:@"No parent folder for “%@”.", _document.displayName] informativeText:[NSString stringWithFormat:@"Do you wish to create a folder at “%@”?", [NSString stringWithCxxString:path::with_tilde(path::parent(path))]] buttons:@"Create Folder", @"Cancel", nil];
+				OakShowAlertForWindow(alert, _window, ^(NSInteger returnCode){
+					if(returnCode == NSAlertFirstButtonReturn)
+							context->set_create_parent(true);
+					else	_cancel = true;
+				});
+			}
+
+			void obtain_authorization (std::string const& path, io::bytes_ptr content, osx::authorization_t auth, file::save_context_ptr context)
+			{
+				if(!_window)
+					return;
+
+				if(auth.obtain_right(kAuthRightName))
+						context->set_authorization(auth);
+				else	_cancel = true;
+			}
+
+			void select_charset (std::string const& path, io::bytes_ptr content, std::string const& charset, file::save_context_ptr context)
+			{
+				if(charset != kCharsetNoEncoding)
+				{
+					if(!_window)
+						return;
+
+					[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentWillShowAlertNotification object:_document];
+					NSAlert* alert = [NSAlert tmAlertWithMessageText:[NSString stringWithFormat:@"Unable to save “%@” using “%@” as encoding.", _document.displayName, to_ns(charset)] informativeText:@"Please choose another encoding:" buttons:@"Save", @"Cancel", nil];
+					OakEncodingPopUpButton* encodingPopUp = [OakEncodingPopUpButton new];
+					[alert setAccessoryView:encodingPopUp];
+					OakShowAlertForWindow(alert, _window, ^(NSInteger returnCode){
+						if(returnCode == NSAlertFirstButtonReturn)
+								context->set_charset(to_s(encodingPopUp.encoding));
+						else	_cancel = true;
+					});
+					[[alert window] recalculateKeyViewLoop];
+				}
+				else
+				{
+					context->set_charset(kCharsetUTF8);
+				}
+			}
 
 			void did_save (std::string const& path, io::bytes_ptr content, encoding::type const& encoding, bool success, std::string const& message, oak::uuid_t const& filter)
 			{
-				if(_close_document)
-					[_document didSaveContent:content atPath:to_ns(path) withEncoding:encoding success:success];
-				_callback->did_save_document(_cppDocument, path, success, message, filter);
-				if(_close_document)
-					[_document close];
+				_block(success ? OakDocumentIOResultSuccess : (_cancel ? OakDocumentIOResultCancel : OakDocumentIOResultFailure), to_ns(path), encoding, to_ns(message), filter);
 			}
 
 		private:
 			OakDocument* _document;
-			document::document_ptr _cppDocument;
-			document::save_callback_ptr _callback;
-			bool _close_document;
+			NSWindow* _window;
+			bool _cancel = false;
+			void(^_block)(OakDocumentIOResult result, NSString* path, encoding::type const& encoding, NSString* errorMessage, oak::uuid_t const& filterUUID);
 		};
 
 		BOOL closeDocument = self.isOpen;
 		if(closeDocument)
 			++self.openCount;
 
-		auto cb = std::make_shared<callback_t>(self, document, callback, closeDocument);
-		file::save(to_s(_path), cb, _authorization, content, attributes, to_s(_fileType), encoding, std::vector<oak::uuid_t>() /* binary import filters */, std::vector<oak::uuid_t>() /* text import filters */);
+		auto cb = std::make_shared<callback_t>(self, aWindow, ^(OakDocumentIOResult result, NSString* path, encoding::type const& encoding, NSString* errorMessage, oak::uuid_t const& filterUUID){
+			if(closeDocument)
+				[self didSaveAtPath:path withEncoding:encoding success:result == OakDocumentIOResultSuccess];
+			if(block)
+				block(result, errorMessage, filterUUID);
+			if(closeDocument)
+				[self close];
+		});
+
+		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentWillSaveNotification object:self];
+		file::save(to_s(_path), cb, _authorization, content, attributes, encoding, std::vector<oak::uuid_t>() /* binary import filters */, std::vector<oak::uuid_t>() /* text import filters */);
+	}
+	else
+	{
+		NSString* errorMessage = [NSString stringWithFormat:@"Cannot save ‘%@’: no content. Has backup %s, is edited %s.", self.displayName, BSTR(_backupPath), BSTR(self.isDocumentEdited)];
+		block(OakDocumentIOResultFailure, errorMessage, oak::uuid_t());
 	}
 }
+
+// =================
 
 - (void)close
 {
@@ -863,8 +996,8 @@ private:
 		void will_replace (size_t from, size_t to, char const* buf, size_t len)
 		{
 			ng::buffer_t const& buffer = [_self buffer];
-			_editing_first_line = from == oak::cap(buffer.begin(0), from, buffer.eol(0));
-			_file_type = _editing_first_line ? file_type(buffer) : NULL_STR;
+			_should_sniff_file_type = from == oak::cap(buffer.begin(0), from, buffer.eol(0)) && _self.shouldSniffFileType;
+			_file_type = _should_sniff_file_type ? file_type(buffer) : NULL_STR;
 		}
 
 		void did_replace (size_t from, size_t to, char const* buf, size_t len)
@@ -872,7 +1005,7 @@ private:
 			_size += len - (to - from);
 			_self.bufferEmpty = _size == 0;
 
-			if(_editing_first_line)
+			if(_should_sniff_file_type)
 			{
 				std::string const newFileType = file_type([_self buffer]);
 				if(newFileType != NULL_STR && newFileType != _file_type)
@@ -891,7 +1024,7 @@ private:
 		size_t _size = 0;
 		OakDocument* _self;
 
-		bool _editing_first_line;
+		bool _should_sniff_file_type;
 		std::string _file_type;
 	};
 
@@ -914,6 +1047,7 @@ private:
 
 - (BOOL)isOpen                                        { return _openCount != 0; }
 - (BOOL)isDocumentEdited                              { return _revision != _savedRevision && (_onDisk || !_bufferEmpty); }
+- (BOOL)shouldSniffFileType                           { return settings_for_path(to_s(_virtualPath ?: _path), scope::scope_t(), to_s(_directory ?: [_path stringByDeletingLastPathComponent])).get(kSettingsFileTypeKey, NULL_STR) == NULL_STR; }
 
 - (BOOL)canUndo                                       { return _undoManager && _undoManager->can_undo(); }
 - (BOOL)canRedo                                       { return _undoManager && _undoManager->can_redo(); }
@@ -1203,7 +1337,10 @@ private:
 			}
 		}
 
-		void show_error (std::string const& path, std::string const& message, oak::uuid_t const& filter)        { fprintf(stderr, "%s: %s\n", path.c_str(), message.c_str()); }
+		void show_error (std::string const& path, std::string const& message, oak::uuid_t const& filter)
+		{
+			fprintf(stderr, "%s: %s\n", path.c_str(), message.c_str());
+		}
 
 		void show_content (std::string const& path, io::bytes_ptr content, std::map<std::string, std::string> const& attributes, encoding::type const& encoding, std::vector<oak::uuid_t> const& binaryImportFilters, std::vector<oak::uuid_t> const& textImportFilters)
 		{

@@ -1,6 +1,5 @@
 #import "DocumentController.h"
 #import "ProjectLayoutView.h"
-#import "DocumentSaveHelper.h"
 #import "DocumentCommand.h" // show_command_error
 #import "SelectGrammarViewController.h"
 #import "OakRunCommandWindowController.h"
@@ -40,7 +39,6 @@ static NSString* const kUserDefaultsDisableFolderStateRestore = @"disableFolderS
 static NSString* const kUserDefaultsHideStatusBarKey = @"hideStatusBar";
 static NSString* const kUserDefaultsDisableBundleSuggestionsKey = @"disableBundleSuggestions";
 static NSString* const kUserDefaultsGrammarsToNeverSuggestKey = @"grammarsToNeverSuggest";
-static BOOL IsInShouldTerminateEventLoop = NO;
 
 @interface QuickLookNSURLWrapper : NSObject <QLPreviewItem>
 @property (nonatomic) NSURL* url;
@@ -173,7 +171,7 @@ namespace
 				switch(event)
 				{
 					case did_change_path:
-						[_self setDocumentPath:[NSString stringWithCxxString:document->path()]];
+						[_self setDocumentPath:[NSString stringWithCxxString:document->logical_path()]];
 						[_self setDocumentDisplayName:[NSString stringWithCxxString:document->display_name()]];
 						if(!_self.projectPath)
 							_self.projectPath = [NSString stringWithCxxString:path::parent(document->path())];
@@ -205,14 +203,6 @@ namespace
 	static bool is_disposable (document::document_ptr const& doc)
 	{
 		return doc && !doc->is_modified() && !doc->is_on_disk() && doc->path() == NULL_STR && doc->buffer().empty();
-	}
-
-	static document::document_ptr create_untitled_document_in_folder (std::string const& suggestedFolder)
-	{
-		auto doc = document::from_content("", settings_for_path(NULL_STR, file::path_attributes(NULL_STR), suggestedFolder).get(kSettingsFileTypeKey, "text.plain"));
-		auto const settings = settings_for_path(NULL_STR, doc->file_type(), suggestedFolder);
-		doc->set_indent(text::indent_t(std::max(1, settings.get(kSettingsTabSizeKey, 4)), SIZE_T_MAX, settings.get(kSettingsSoftTabsKey, false)));
-		return doc;
 	}
 }
 
@@ -377,7 +367,7 @@ namespace
 {
 	if(_documents.empty())
 	{
-		document::document_ptr defaultDocument = create_untitled_document_in_folder(to_s(self.untitledSavePath));
+		document::document_ptr defaultDocument = document::create();
 		self.documents = { defaultDocument };
 		[self openAndSelectDocument:defaultDocument];
 	}
@@ -437,122 +427,84 @@ namespace
 
 - (void)applicationDidResignActiveNotification:(NSNotification*)aNotification
 {
-	struct save_callback_t : document::save_callback_t, std::enable_shared_from_this<save_callback_t>
-	{
-		save_callback_t (std::vector<document::document_ptr> documents) : _documents(documents) { }
+	static BOOL IsSaving = NO;
+	if(std::exchange(IsSaving, YES))
+		return;
 
-		void select_path (std::string const& path, io::bytes_ptr content, file::save_context_ptr context)          { }
-		void select_make_writable (std::string const& path, io::bytes_ptr content, file::save_context_ptr context) { }
-		void select_create_parent (std::string const& path, io::bytes_ptr content, file::save_context_ptr context) { }
-		void obtain_authorization (std::string const& path, io::bytes_ptr content, osx::authorization_t auth, file::save_context_ptr context) { }
-		void select_charset (std::string const& path, io::bytes_ptr content, std::string const& charset, file::save_context_ptr context)      { }
-
-		void did_save_document (document::document_ptr document, std::string const& path, bool success, std::string const& message, oak::uuid_t const& filter)
-		{
-			++_current;
-			save_next();
-		}
-
-		void save_next ()
-		{
-			if(_current < _documents.size())
-				_documents[_current]->try_save(shared_from_this());
-		}
-
-	private:
-		std::vector<document::document_ptr> _documents;
-		size_t _current = 0;
-	};
-
-	std::vector<document::document_ptr> documentsToSave;
+	NSMutableArray* documentsToSave = [NSMutableArray array];
 	for(auto doc : _documents)
 	{
 		if(doc->is_modified() && doc->path() != NULL_STR)
 		{
-			settings_t const settings = settings_for_path(doc->virtual_path(), doc->file_type(), path::parent(doc->path()));
+			settings_t const settings = settings_for_path(doc->logical_path(), doc->file_type(), path::parent(doc->path()));
 			if(settings.get(kSettingsSaveOnBlurKey, false))
 			{
 				if(doc == _selectedDocument)
 					[_textView updateDocumentMetadata];
-				documentsToSave.push_back(doc);
+				[documentsToSave addObject:doc->document()];
 			}
 		}
 	}
 
-	auto callback = std::make_shared<save_callback_t>(documentsToSave);
-	callback->save_next();
-
-	if(!_documents.empty())
-		[self.textView performSelector:@selector(applicationDidResignActiveNotification:) withObject:aNotification];
+	[self saveDocumentsUsingEnumerator:[documentsToSave objectEnumerator] completionHandler:^(OakDocumentIOResult result){
+		if(!_documents.empty())
+			[self.textView performSelector:@selector(applicationDidResignActiveNotification:) withObject:aNotification];
+		IsSaving = NO;
+	}];
 }
 
 // =================
 // = Close Methods =
 // =================
 
-- (void)showCloseWarningUIForDocuments:(std::vector<document::document_ptr> const&)someDocuments completionHandler:(void(^)(BOOL canClose))callback
++ (NSAlert*)saveAlertForDocuments:(NSArray<OakDocument*>*)someDocuments
 {
-	if(someDocuments.empty())
-		return callback(YES);
-
-	[[self.window attachedSheet] orderOut:self];
 	NSAlert* alert = [[NSAlert alloc] init];
 	[alert setAlertStyle:NSWarningAlertStyle];
 	[alert addButtons:@"Save", @"Cancel", @"Don’t Save", nil];
-	if(someDocuments.size() == 1)
+	if(someDocuments.count == 1)
 	{
-		document::document_ptr document = someDocuments.front();
-		[alert setMessageText:[NSString stringWithCxxString:text::format("Do you want to save the changes you made in the document “%s”?", document->display_name().c_str())]];
+		OakDocument* document = someDocuments.firstObject;
+		[alert setMessageText:[NSString stringWithFormat:@"Do you want to save the changes you made in the document “%@”?", document.displayName]];
 		[alert setInformativeText:@"Your changes will be lost if you don’t save them."];
 	}
 	else
 	{
-		std::string body = "";
-		for(auto document : someDocuments)
-			body += text::format("• “%s”\n", document->display_name().c_str());
+		NSString* body = @"";
+		for(OakDocument* document in someDocuments)
+			body = [body stringByAppendingFormat:@"• “%@”\n", document.displayName];
 		[alert setMessageText:@"Do you want to save documents with changes?"];
-		[alert setInformativeText:[NSString stringWithCxxString:body]];
+		[alert setInformativeText:body];
 	}
+	return alert;
+}
 
-	bool windowModal = true;
-	if(someDocuments.size() == 1)
+- (void)showCloseWarningUIForDocuments:(NSArray<OakDocument*>*)someDocuments completionHandler:(void(^)(BOOL canClose))callback
+{
+	if(!someDocuments.count)
+		return callback(YES);
+
+	if(someDocuments.count == 1)
 	{
-		NSUInteger index = 0;
-		for(auto document : _documents)
+		for(size_t i = 0; i < _documents.size(); ++i)
 		{
-			if(*document == *someDocuments.front())
+			if(someDocuments.firstObject == _documents[i]->document())
 			{
-				self.selectedTabIndex = index;
-				[self openAndSelectDocument:document];
+				self.selectedTabIndex = i;
+				[self openAndSelectDocument:_documents[i]];
 				break;
 			}
-			++index;
-		}
-	}
-	else
-	{
-		std::set<oak::uuid_t> uuids;
-		std::transform(_documents.begin(), _documents.end(), inserter(uuids, uuids.end()), [](document::document_ptr const& doc){ return doc->identifier(); });
-
-		for(auto document : someDocuments)
-		{
-			if(uuids.find(document->identifier()) == uuids.end())
-				windowModal = false;
 		}
 	}
 
-	std::vector<document::document_ptr> documentsToSave(someDocuments);
-	auto block = ^(NSInteger returnCode)
-	{
+	NSAlert* alert = [DocumentController saveAlertForDocuments:someDocuments];
+	OakShowAlertForWindow(alert, self.window, ^(NSInteger returnCode){
 		switch(returnCode)
 		{
 			case NSAlertFirstButtonReturn: /* "Save" */
 			{
-				if(std::exchange(IsInShouldTerminateEventLoop, NO))
-					[NSApp replyToApplicationShouldTerminate:NO];
-
-				[DocumentSaveHelper trySaveDocuments:documentsToSave forWindow:self.window defaultDirectory:self.untitledSavePath completionHandler:^(BOOL success){
-					callback(success);
+				[self saveDocumentsUsingEnumerator:[someDocuments objectEnumerator] completionHandler:^(OakDocumentIOResult result){
+					callback(result == OakDocumentIOResultSuccess);
 				}];
 			}
 			break;
@@ -569,11 +521,7 @@ namespace
 			}
 			break;
 		}
-	};
-
-	if(windowModal)
-			OakShowAlertForWindow(alert, self.window, block);
-	else	block([alert runModal]);
+	});
 }
 
 - (void)closeTabsAtIndexes:(NSIndexSet*)anIndexSet askToSaveChanges:(BOOL)askToSaveFlag createDocumentIfEmpty:(BOOL)createIfEmptyFlag
@@ -590,12 +538,16 @@ namespace
 
 	if(askToSaveFlag)
 	{
-		std::vector<document::document_ptr> documents;
-		std::copy_if(documentsToClose.begin(), documentsToClose.end(), back_inserter(documents), [](document::document_ptr const& doc){ return doc->is_modified(); });
-
-		if(!documents.empty())
+		NSMutableArray<OakDocument*>* documentsToSave = [NSMutableArray array];
+		for(auto doc : documentsToClose)
 		{
-			[self showCloseWarningUIForDocuments:documents completionHandler:^(BOOL canClose){
+			if(doc->is_modified())
+				[documentsToSave addObject:doc->document()];
+		}
+
+		if(documentsToSave.count)
+		{
+			[self showCloseWarningUIForDocuments:documentsToSave completionHandler:^(BOOL canClose){
 				if(canClose)
 				{
 					[self closeTabsAtIndexes:anIndexSet askToSaveChanges:NO createDocumentIfEmpty:createIfEmptyFlag];
@@ -633,7 +585,7 @@ namespace
 	crashInfo << text::format("keep %zu documents open, new selected index at %zu, create untitled %s", newDocuments.size(), newSelectedTabIndex, BSTR((createIfEmptyFlag && newDocuments.empty())));
 
 	if(createIfEmptyFlag && newDocuments.empty())
-		newDocuments.push_back(create_untitled_document_in_folder(to_s(self.untitledSavePath)));
+		newDocuments.push_back(document::create());
 
 	self.documents        = newDocuments;
 	self.selectedTabIndex = newSelectedTabIndex;
@@ -714,16 +666,20 @@ namespace
 		return NO;
 	}
 
-	std::vector<document::document_ptr> documents;
-	std::copy_if(_documents.begin(), _documents.end(), back_inserter(documents), [](document::document_ptr const& doc){ return doc->is_modified(); });
+	NSMutableArray<OakDocument*>* documentsToSave = [NSMutableArray array];
+	for(auto doc : _documents)
+	{
+		if(doc->is_modified())
+			[documentsToSave addObject:doc->document()];
+	}
 
-	if(documents.empty())
+	if(!documentsToSave.count)
 	{
 		[self saveProjectState];
 		return YES;
 	}
 
-	[self showCloseWarningUIForDocuments:documents completionHandler:^(BOOL canClose){
+	[self showCloseWarningUIForDocuments:documentsToSave completionHandler:^(BOOL canClose){
 		if(canClose)
 		{
 			[self saveProjectState];
@@ -775,38 +731,84 @@ namespace
 	}
 }
 
+- (NSArray<OakDocument*>*)documentsNeedingSaving
+{
+	BOOL restoresSession = ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableSessionRestoreKey];
+
+	NSMutableArray<OakDocument*>* res = [NSMutableArray array];
+	for(auto doc : _documents)
+	{
+		if(doc->is_modified() && (doc->path() != NULL_STR || !restoresSession))
+			[res addObject:doc->document()];
+	}
+	return res.count ? res : nil;
+}
+
++ (void)saveControllersUsingEnumerator:(NSEnumerator*)anEnumerator completionHandler:(void(^)(OakDocumentIOResult result))callback
+{
+	if(DocumentController* controller = [anEnumerator nextObject])
+	{
+		[controller saveDocumentsUsingEnumerator:[controller.documentsNeedingSaving objectEnumerator] completionHandler:^(OakDocumentIOResult result){
+			if(result == OakDocumentIOResultSuccess)
+				[self saveControllersUsingEnumerator:anEnumerator completionHandler:callback];
+			else if(callback)
+				callback(result);
+		}];
+	}
+	else if(callback)
+	{
+		callback(OakDocumentIOResultSuccess);
+	}
+}
+
 + (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender
 {
-	DocumentController* controller;
-
-	BOOL restoresSession = ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableSessionRestoreKey];
-	std::vector<document::document_ptr> documents;
-	for(DocumentController* delegate in SortedControllers())
+	NSMutableArray<DocumentController*>* controllers = [NSMutableArray array];
+	NSMutableArray<OakDocument*>* documents = [NSMutableArray array];
+	for(DocumentController* controller in SortedControllers())
 	{
-		auto delegateDocuments = delegate.documents; // Returns by-value so each result is unique
-		std::copy_if(delegateDocuments.begin(), delegateDocuments.end(), back_inserter(documents), [&restoresSession](document::document_ptr const& doc){ return doc->is_modified() && (doc->path() != NULL_STR || !restoresSession); });
-		if(!documents.empty() && !controller)
-			controller = delegate;
+		if(NSArray* newDocs = controller.documentsNeedingSaving)
+		{
+			[controllers addObject:controller];
+			[documents addObjectsFromArray:newDocs];
+		}
 	}
 
-	if(documents.empty())
+	if(controllers.count == 0)
 	{
 		[self saveSessionAndDetachBackups];
 		return NSTerminateNow;
 	}
-
-	IsInShouldTerminateEventLoop = YES;
-
-	[controller showCloseWarningUIForDocuments:documents completionHandler:^(BOOL canClose){
-		if(canClose)
-			[self saveSessionAndDetachBackups];
-
-		if(std::exchange(IsInShouldTerminateEventLoop, NO))
+	else if(controllers.count == 1)
+	{
+		DocumentController* controller = controllers.firstObject;
+		[controller showCloseWarningUIForDocuments:controller.documentsNeedingSaving completionHandler:^(BOOL canClose){
+			if(canClose)
+				[self saveSessionAndDetachBackups];
 			[NSApp replyToApplicationShouldTerminate:canClose];
-		else if(canClose)
-			[NSApp terminate:self];
-	}];
+		}];
+	}
+	else
+	{
+		switch([[DocumentController saveAlertForDocuments:documents] runModal])
+		{
+			case NSAlertFirstButtonReturn: /* "Save" */
+			{
+				[self saveControllersUsingEnumerator:[controllers objectEnumerator] completionHandler:^(OakDocumentIOResult result){
+					if(result == OakDocumentIOResultSuccess)
+						[self saveSessionAndDetachBackups];
+					[NSApp replyToApplicationShouldTerminate:result == OakDocumentIOResultSuccess];
+				}];
+			}
+			break;
 
+			case NSAlertSecondButtonReturn: /* "Cancel" */
+				return NSTerminateCancel;
+
+			case NSAlertThirdButtonReturn: /* "Don't Save" */
+				return NSTerminateNow;
+		}
+	}
 	return NSTerminateLater;
 }
 
@@ -866,8 +868,6 @@ namespace
 		{
 			document::document_ptr doc = document::create(to_s([url path]));
 			doc->set_file_type(fileType);
-			auto const settings = settings_for_path(doc->virtual_path(), doc->file_type(), path::parent(doc->path()));
-			doc->set_indent(text::indent_t(std::max(1, settings.get(kSettingsTabSizeKey, 4)), SIZE_T_MAX, settings.get(kSettingsSoftTabsKey, false)));
 
 			[self insertDocuments:{ doc } atIndex:_selectedTabIndex + 1 selecting:doc andClosing:[self disposableDocument]];
 
@@ -1033,8 +1033,10 @@ namespace
 - (void)openAndSelectDocument:(document::document_ptr const&)aDocument
 {
 	document::document_ptr doc = aDocument;
-	[doc->document() loadModalForWindow:self.window completionHandler:^(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID){
-		if(success)
+	OakDocument* document = doc->document();
+	document.directory = [document.path stringByDeletingLastPathComponent] ?: self.projectPath;
+	[doc->document() loadModalForWindow:self.window completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
+		if(result == OakDocumentIOResultSuccess)
 		{
 			OakDocument* document = doc->document();
 			BOOL showBundleSuggestions = ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisableBundleSuggestionsKey];
@@ -1116,12 +1118,12 @@ namespace
 
 	if(_selectedDocument->path() != NULL_STR)
 	{
-		[DocumentSaveHelper trySaveDocument:_selectedDocument forWindow:self.window defaultDirectory:nil completionHandler:nil];
+		[self saveDocumentsUsingEnumerator:@[ _selectedDocument->document() ].objectEnumerator completionHandler:nil];
 	}
 	else
 	{
 		NSString* const suggestedFolder  = self.untitledSavePath;
-		NSString* const suggestedName    = DefaultSaveNameForDocument(_selectedDocument);
+		NSString* const suggestedName    = [_selectedDocument->document() displayNameWithExtension:YES];
 		[OakSavePanel showWithPath:suggestedName directory:suggestedFolder fowWindow:self.window encoding:_selectedDocument->disk_encoding() completionHandler:^(NSString* path, encoding::type const& encoding){
 			if(!path)
 				return;
@@ -1149,7 +1151,7 @@ namespace
 				[self insertDocuments:documents atIndex:_selectedTabIndex selecting:documents.front() andClosing:{ }];
 			}
 
-			[DocumentSaveHelper trySaveDocument:_selectedDocument forWindow:self.window defaultDirectory:nil completionHandler:nil];
+			[self saveDocumentsUsingEnumerator:@[ _selectedDocument->document() ].objectEnumerator completionHandler:nil];
 		}];
 	}
 }
@@ -1161,36 +1163,84 @@ namespace
 
 	std::string const documentPath   = _selectedDocument->path();
 	NSString* const suggestedFolder  = [NSString stringWithCxxString:path::parent(documentPath)] ?: self.untitledSavePath;
-	NSString* const suggestedName    = [NSString stringWithCxxString:path::name(documentPath)]   ?: DefaultSaveNameForDocument(_selectedDocument);
+	NSString* const suggestedName    = [NSString stringWithCxxString:path::name(documentPath)]   ?: [_selectedDocument->document() displayNameWithExtension:YES];
 	[OakSavePanel showWithPath:suggestedName directory:suggestedFolder fowWindow:self.window encoding:_selectedDocument->disk_encoding() completionHandler:^(NSString* path, encoding::type const& encoding){
 		if(!path)
 			return;
 		_selectedDocument->set_path(to_s(path));
 		_selectedDocument->set_disk_encoding(encoding);
-		[DocumentSaveHelper trySaveDocument:_selectedDocument forWindow:self.window defaultDirectory:nil completionHandler:nil];
+		[self saveDocumentsUsingEnumerator:@[ _selectedDocument->document() ].objectEnumerator completionHandler:nil];
 	}];
+}
+
+- (void)saveDocumentsUsingEnumerator:(NSEnumerator*)anEnumerator completionHandler:(void(^)(OakDocumentIOResult result))callback
+{
+	if(OakDocument* document = [anEnumerator nextObject])
+	{
+		id observerId = [[NSNotificationCenter defaultCenter] addObserverForName:OakDocumentWillShowAlertNotification object:document queue:nil usingBlock:^(NSNotification*){
+			for(size_t i = 0; i < _documents.size(); ++i)
+			{
+				if(document.isOpen && _documents[i]->document() == document)
+				{
+					self.selectedTabIndex = i;
+					[self setSelectedDocument:_documents[i]];
+
+					if(NSApp.isActive && (self.window.isMiniaturized || !self.window.isKeyWindow))
+						[self.window makeKeyAndOrderFront:self];
+
+					break;
+				}
+			}
+		}];
+
+		[document saveModalForWindow:self.window completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
+			[[NSNotificationCenter defaultCenter] removeObserver:observerId];
+			if(result == OakDocumentIOResultSuccess)
+			{
+				[self saveDocumentsUsingEnumerator:anEnumerator completionHandler:callback];
+			}
+			else
+			{
+				if(result == OakDocumentIOResultFailure)
+				{
+					[self.window.attachedSheet orderOut:self];
+					if(filterUUID)
+							show_command_error(to_s(errorMessage), filterUUID, self.window);
+					else	[[NSAlert tmAlertWithMessageText:[NSString stringWithFormat:@"The document “%@” could not be saved.", document.displayName] informativeText:(errorMessage ?: @"Please check Console output for reason.") buttons:@"OK", nil] beginSheetModalForWindow:self.window modalDelegate:nil didEndSelector:NULL contextInfo:NULL];
+				}
+
+				if(callback)
+					callback(result);
+			}
+		}];
+	}
+	else
+	{
+		if(callback)
+			callback(OakDocumentIOResultSuccess);
+	}
 }
 
 - (IBAction)saveAllDocuments:(id)sender
 {
-	std::vector<document::document_ptr> documentsToSave;
+	NSMutableArray* documentsToSave = [NSMutableArray array];
 	for(auto document : _documents)
 	{
 		if(document->is_modified())
-			documentsToSave.push_back(document);
+			[documentsToSave addObject:document->document()];
 	}
-	[DocumentSaveHelper trySaveDocuments:documentsToSave forWindow:self.window defaultDirectory:self.untitledSavePath completionHandler:nil];
+	[self saveDocumentsUsingEnumerator:[documentsToSave objectEnumerator] completionHandler:nil];
 }
 
 - (void)bundleItemPreExec:(pre_exec::type)preExec completionHandler:(void(^)(BOOL success))callback
 {
-	std::vector<document::document_ptr> documentsToSave;
+	NSMutableArray* documentsToSave = [NSMutableArray array];
 	switch(preExec)
 	{
 		case pre_exec::save_document:
 		{
 			if(_selectedDocument && (_selectedDocument->is_modified() || !_selectedDocument->is_on_disk()))
-				documentsToSave.push_back(_selectedDocument);
+				[documentsToSave addObject:_selectedDocument->document()];
 		}
 		break;
 
@@ -1199,22 +1249,15 @@ namespace
 			for(auto document : _documents)
 			{
 				if(document->is_modified() && document->path() != NULL_STR)
-					documentsToSave.push_back(document);
+					[documentsToSave addObject:document->document()];
 			}
 		}
 		break;
 	}
 
-	if(!documentsToSave.empty())
-	{
-		[DocumentSaveHelper trySaveDocuments:documentsToSave forWindow:self.window defaultDirectory:self.untitledSavePath completionHandler:^(BOOL success){
-			callback(success);
-		}];
-	}
-	else
-	{
-		callback(YES);
-	}
+	[self saveDocumentsUsingEnumerator:[documentsToSave objectEnumerator] completionHandler:^(OakDocumentIOResult result){
+		callback(result == OakDocumentIOResultSuccess);
+	}];
 }
 
 - (NSArray*)outputWindowsForCommandUUID:(oak::uuid_t const&)anUUID
@@ -1322,7 +1365,7 @@ namespace
 			map["projectDirectory"] = to_s(self.projectPath);
 
 		std::string docDirectory = _selectedDocument->path() != NULL_STR ? path::parent(_selectedDocument->path()) : to_s(self.untitledSavePath);
-		settings_t const settings = settings_for_path(_selectedDocument->virtual_path(), _selectedDocument->file_type() + " " + to_s(self.scopeAttributes), docDirectory, map);
+		settings_t const settings = settings_for_path(_selectedDocument->logical_path(), _selectedDocument->file_type() + " " + to_s(self.scopeAttributes), docDirectory, map);
 		self.window.title = [NSString stringWithCxxString:settings.get(kSettingsWindowTitleKey, to_s(self.documentDisplayName))];
 	}
 	else
@@ -1356,11 +1399,11 @@ namespace
 	};
 
 	_externalScopeAttributes.clear();
-	if(!_documentPath && !_projectPath)
+	if(!_selectedDocument && !_projectPath)
 		return;
 
 	std::string const projectDir   = to_s(_projectPath ?: NSHomeDirectory());
-	std::string const documentPath = _documentPath ? to_s(_documentPath) : path::join(projectDir, "dummy");
+	std::string const documentPath = _selectedDocument && _selectedDocument->path() != NULL_STR ? _selectedDocument->path() : path::join(projectDir, "dummy");
 
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
 
@@ -1395,7 +1438,7 @@ namespace
 
 		dispatch_async(dispatch_get_main_queue(), ^{
 			std::string const currentProjectDir   = to_s(_projectPath ?: NSHomeDirectory());
-			std::string const currentDocumentPath = _documentPath ? to_s(_documentPath) : path::join(projectDir, "dummy");
+			std::string const currentDocumentPath = _selectedDocument ? _selectedDocument->path() : path::join(projectDir, "dummy");
 			if(projectDir == currentProjectDir && currentDocumentPath == currentDocumentPath)
 				_externalScopeAttributes = res;
 		});
@@ -1608,7 +1651,7 @@ namespace
 		}
 
 		self.projectPath         = projectPath;
-		self.documentPath        = [NSString stringWithCxxString:_selectedDocument->path()];
+		self.documentPath        = [NSString stringWithCxxString:_selectedDocument->logical_path()];
 		self.documentDisplayName = [NSString stringWithCxxString:_selectedDocument->display_name()];
 		self.documentIsModified  = _selectedDocument->is_modified();
 		self.documentIsOnDisk    = _selectedDocument->is_on_disk();
@@ -1673,7 +1716,7 @@ namespace
 {
 	if(NSIndexSet* indexSet = [self tryObtainIndexSetFrom:sender])
 	{
-		document::document_ptr doc = create_untitled_document_in_folder(to_s(self.untitledSavePath));
+		document::document_ptr doc = document::create();
 		[self insertDocuments:{ doc } atIndex:[indexSet firstIndex] selecting:doc andClosing:{ }];
 		[self openAndSelectDocument:doc];
 	}
@@ -2166,7 +2209,7 @@ namespace
 
 - (NSString*)untitledSavePath
 {
-	NSString* res = self.projectPath ?: [self.documentPath stringByDeletingLastPathComponent];
+	NSString* res = self.projectPath ?: (_selectedDocument ? to_ns(path::parent(_selectedDocument->path())) : nil);
 	if(self.fileBrowserVisible)
 	{
 		NSArray* selectedURLs = self.fileBrowser.selectedURLs;
@@ -2233,7 +2276,7 @@ namespace
 	if(self.projectPath)
 		map["projectDirectory"] = to_s(self.projectPath);
 
-	settings_t const settings = settings_for_path(_selectedDocument->virtual_path(), _selectedDocument->file_type() + " " + to_s(self.scopeAttributes), path::parent(documentPath), map);
+	settings_t const settings = settings_for_path(_selectedDocument->logical_path(), _selectedDocument->file_type() + " " + to_s(self.scopeAttributes), path::parent(documentPath), map);
 	std::string const customCandidate = settings.get(kSettingsRelatedFilePathKey, NULL_STR);
 
 	if(customCandidate != NULL_STR && customCandidate != documentPath && (std::find_if(_documents.begin(), _documents.end(), [&customCandidate](document::document_ptr const& doc){ return customCandidate == doc->path(); }) != _documents.end() || path::exists(customCandidate)))
@@ -2522,6 +2565,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 		self.htmlOutputSize = NSSizeFromString(htmlOutputSize);
 
 	self.defaultProjectPath = project[@"projectPath"];
+	self.projectPath        = project[@"projectPath"];
 	self.fileBrowserHistory = project[@"fileBrowserState"];
 	self.fileBrowserVisible = [project[@"fileBrowserVisible"] boolValue];
 
@@ -2538,7 +2582,9 @@ static NSUInteger DisableSessionSavingCount = 0;
 			if(path && skipMissing && access([path fileSystemRepresentation], F_OK) != 0)
 				continue;
 
-			doc = path ? document::create(to_s(path)) : create_untitled_document_in_folder(to_s(self.untitledSavePath));
+			doc = document::create(to_s(path));
+			if(NSString* fileType = info[@"fileType"])
+				doc->set_file_type(to_s(fileType));
 			if(NSString* displayName = info[@"displayName"])
 				doc->set_custom_name(to_s(displayName));
 			if([info[@"sticky"] boolValue])
@@ -2553,7 +2599,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 	}
 
 	if(documents.empty())
-		documents.push_back(create_untitled_document_in_folder(to_s(self.untitledSavePath)));
+		documents.push_back(document::create());
 
 	self.documents        = documents;
 	self.selectedTabIndex = selectedTabIndex;
@@ -2597,6 +2643,8 @@ static NSUInteger DisableSessionSavingCount = 0;
 		}
 		if(document->path() != NULL_STR)
 			doc[@"path"] = [NSString stringWithCxxString:document->path()];
+		if(document->file_type() != NULL_STR) // TODO Only necessary when document.isBufferEmpty
+			doc[@"fileType"] = [NSString stringWithCxxString:document->file_type()];
 		if(document->display_name() != NULL_STR)
 			doc[@"displayName"] = [NSString stringWithCxxString:document->display_name()];
 		if(document == self.selectedDocument)
@@ -2841,7 +2889,7 @@ static NSUInteger DisableSessionSavingCount = 0;
 			{
 				controller.defaultProjectPath = [NSString stringWithCxxString:folder];
 				controller.fileBrowserVisible = YES;
-				controller.documents          = { create_untitled_document_in_folder(folder) };
+				controller.documents          = { document::create() };
 				controller.fileBrowser.url    = [NSURL fileURLWithPath:[NSString stringWithCxxString:folder]];
 
 				[controller openAndSelectDocument:controller.documents[controller.selectedTabIndex]];

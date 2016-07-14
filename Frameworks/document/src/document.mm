@@ -23,6 +23,7 @@ OAK_DEBUG_VAR(Document);
 	OakDocument* _document;
 	document::document_t* _cppDocument;
 }
+@property (nonatomic, readonly) BOOL hasCallbacks;
 @end
 
 namespace document
@@ -326,6 +327,11 @@ static std::map<std::string, document::document_t::callback_t::event_t> const Ob
 	_callbacks.remove(callback);
 }
 
+- (BOOL)hasCallbacks
+{
+	return _callbacks.begin() != _callbacks.end();
+}
+
 - (void)breadcast:(document::document_t::callback_t::event_t)event
 {
 	if(auto document = _cppDocument/*.lock()*/)
@@ -458,8 +464,8 @@ namespace document
 
 	document_t::~document_t ()
 	{
-		documents.remove(identifier());
 		_observer = nil;
+		documents.remove(identifier());
 	}
 
 	OakDocumentObserver* document_t::observer ()
@@ -513,7 +519,7 @@ namespace document
 		__block bool didStop = false;
 
 		auto runLoop = std::make_shared<cf::run_loop_t>(runLoopMode);
-		[_document loadModalForWindow:nil completionHandler:^(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID){
+		[_document loadModalForWindow:nil completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
 			didStop = true;
 			runLoop->stop();
 		}];
@@ -524,27 +530,18 @@ namespace document
 
 	bool document_t::sync_save (CFStringRef runLoopMode)
 	{
-		struct stall_t : save_callback_t
-		{
-			stall_t (bool& res, CFStringRef runLoopMode) : _res(res), _run_loop(runLoopMode) { }
+		__block bool res = false;
+		__block bool didStop = false;
 
-			void did_save_document (document_ptr document, std::string const& path, bool success, std::string const& message, oak::uuid_t const& filter)
-			{
-				_res = success;
-				_run_loop.stop();
-			}
+		auto runLoop = std::make_shared<cf::run_loop_t>(runLoopMode);
+		[_document saveModalForWindow:nil completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
+			res = result == OakDocumentIOResultSuccess;
+			didStop = true;
+			runLoop->stop();
+		}];
 
-			void wait () { _run_loop.start(); }
-
-		private:
-			bool& _res;
-			cf::run_loop_t _run_loop;
-		};
-
-		bool res = false;
-		auto cb = std::make_shared<stall_t>(res, runLoopMode);
-		try_save(cb);
-		cb->wait();
+		if(!didStop)
+			runLoop->start();
 
 		return res;
 	}
@@ -581,14 +578,11 @@ namespace document
 		}];
 	}
 
-	void document_t::try_save (document::save_callback_ptr callback)
-	{
-		[_document trySaveUsingCallback:callback forDocument:shared_from_this()];
-	}
-
 	void document_t::close ()
 	{
 		[_document close];
+		if(!_document.isOpen && !_observer.hasCallbacks)
+			_observer = nil;
 	}
 
 	void document_t::add_mark (text::pos_t const& pos, std::string const& mark, std::string const& value)
@@ -613,7 +607,9 @@ namespace document
 
 	void document_t::remove_callback (callback_t* callback)
 	{
-		[observer() removeCallback:callback];
+		[_observer removeCallback:callback];
+		if(!_document.isOpen && !_observer.hasCallbacks)
+			_observer = nil;
 	}
 
 	// ===========

@@ -4,8 +4,17 @@
 
 PUBLIC extern NSString* OakDocumentContentDidChangeNotification;
 PUBLIC extern NSString* OakDocumentMarksDidChangeNotification;
+PUBLIC extern NSString* OakDocumentWillSaveNotification;
 PUBLIC extern NSString* OakDocumentDidSaveNotification;
 PUBLIC extern NSString* OakDocumentWillCloseNotification;
+PUBLIC extern NSString* OakDocumentWillShowAlertNotification;
+
+typedef NS_ENUM(NSInteger, OakDocumentIOResult) {
+	OakDocumentIOResultSuccess = 0,
+	OakDocumentIOResultCancel,
+	OakDocumentIOResultFailure,
+	OakDocumentIOResultCount
+};
 
 @class BundleGrammar;
 
@@ -16,6 +25,7 @@ PUBLIC @interface OakDocument : NSObject
 
 @property (nonatomic) NSUUID* identifier;
 @property (nonatomic) NSString* path;
+@property (nonatomic) NSString* directory;    // Where to find settings for untitled documents
 @property (nonatomic) NSString* virtualPath;  // Used for file type detection and settings (rmate)
 @property (nonatomic) NSString* customName;
 @property (nonatomic, readonly) NSString* displayName;
@@ -24,7 +34,10 @@ PUBLIC @interface OakDocument : NSObject
 @property (nonatomic) NSString* diskEncoding;
 @property (nonatomic) NSString* diskNewlines;
 
-- (void)loadModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(BOOL success, NSString* errorMessage, oak::uuid_t const& filterUUID))block;
+- (NSString*)displayNameWithExtension:(BOOL)flag;
+
+- (void)loadModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID))block;
+- (void)saveModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID))block;
 - (void)close;
 
 @property (nonatomic) osx::authorization_t authorization;

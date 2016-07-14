@@ -60,10 +60,28 @@ void OakShowSheetForWindow (NSWindow* sheet, NSWindow* window, void(^callback)(N
 
 void OakShowAlertForWindow (NSAlert* alert, NSWindow* window, void(^callback)(NSInteger))
 {
+	if(window && [alert respondsToSelector:@selector(beginSheetModalForWindow:completionHandler:)])
+	{
+		[alert beginSheetModalForWindow:window completionHandler:callback];
+		return;
+	}
+
 	OakSheetCallbackDelegate* delegate = [[OakSheetCallbackDelegate alloc] initWithBlock:callback];
-	if(window)
-			[alert beginSheetModalForWindow:window modalDelegate:delegate didEndSelector:@selector(sheetDidEnd:returnCode:contextInfo:) contextInfo:NULL];
-	else	[delegate sheetDidEnd:alert returnCode:[alert runModal] contextInfo:NULL];
+	if(window.attachedSheet)
+	{
+		__weak __block id observerId = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidEndSheetNotification object:window queue:nil usingBlock:^(NSNotification*){
+			[[NSNotificationCenter defaultCenter] removeObserver:observerId];
+			OakShowAlertForWindow(alert, window, callback);
+		}];
+	}
+	else if(window)
+	{
+		[alert beginSheetModalForWindow:window modalDelegate:delegate didEndSelector:@selector(sheetDidEnd:returnCode:contextInfo:) contextInfo:NULL];
+	}
+	else
+	{
+		[delegate sheetDidEnd:alert returnCode:[alert runModal] contextInfo:NULL];
+	}
 }
 
 // ======================
